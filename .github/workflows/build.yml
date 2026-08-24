@@ -1,0 +1,3545 @@
+name: Build Waqt APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Install Gradle 8.7
+        run: |
+          curl -sSL -o /tmp/gradle.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
+          sudo unzip -q -d /opt /tmp/gradle.zip
+          echo "/opt/gradle-8.7/bin" >> $GITHUB_PATH
+
+      - name: Restore signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            mkdir -p keys
+            echo "$KEYSTORE_B64" | base64 -d > keys/debug.keystore
+            echo "Using the stored signing key."
+          else
+            echo "::warning::No DEBUG_KEYSTORE_B64 secret set. This build gets a throwaway key and will not install over previous builds."
+          fi
+
+      - name: Write project files
+        run: |
+          set -e
+          mkdir -p app/src/main/java/com/waqt app/src/main/res/values app/src/main/res/xml app/src/main/res/drawable
+
+          echo "  settings.gradle.kts"
+          cat > settings.gradle.kts << 'PPEOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "Waqt"
+          include(":app")
+          PPEOF
+
+          echo "  build.gradle.kts"
+          cat > build.gradle.kts << 'PPEOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          PPEOF
+
+          echo "  gradle.properties"
+          cat > gradle.properties << 'PPEOF'
+          org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
+          org.gradle.parallel=true
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          kotlin.code.style=official
+          PPEOF
+
+          echo "  app/build.gradle.kts"
+          cat > app/build.gradle.kts << 'PPEOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          val runNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
+
+          android {
+              namespace = "com.waqt"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.waqt"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = runNumber
+                  versionName = "1.$runNumber"
+              }
+
+              signingConfigs {
+                  getByName("debug") {
+                      val ks = rootProject.file("keys/debug.keystore")
+                      if (ks.exists()) {
+                          storeFile = ks
+                          storePassword = "android"
+                          keyAlias = "androiddebugkey"
+                          keyPassword = "android"
+                      }
+                  }
+              }
+
+              buildTypes {
+                  debug {
+                      isMinifyEnabled = false
+                      signingConfig = signingConfigs.getByName("debug")
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          PPEOF
+
+          echo "  app/src/main/AndroidManifest.xml"
+          cat > app/src/main/AndroidManifest.xml << 'PPEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:name=".App"
+                  android:allowBackup="true"
+                  android:icon="@drawable/ic_launcher"
+                  android:label="@string/app_name"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:configChanges="uiMode"
+                      android:exported="true"
+                      android:label="@string/app_name">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <activity android:name=".AppsActivity" android:configChanges="uiMode" android:exported="false" />
+                  <activity android:name=".AppRuleActivity" android:configChanges="uiMode" android:exported="false" />
+                  <activity android:name=".CardsActivity" android:configChanges="uiMode" android:exported="false" />
+                  <activity android:name=".EditorActivity" android:configChanges="uiMode" android:exported="false" />
+                  <activity android:name=".SettingsActivity" android:configChanges="uiMode" android:exported="false" />
+
+                  <service
+                      android:name=".GuardService"
+                      android:exported="true"
+                      android:label="@string/app_name"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/acc_config" />
+                  </service>
+
+              </application>
+          </manifest>
+          PPEOF
+
+          echo "  app/src/main/java/com/waqt/App.kt"
+          cat > app/src/main/java/com/waqt/App.kt << 'PPEOF'
+          package com.waqt
+
+          import android.app.Application
+          import android.content.Context
+          import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
+          import android.graphics.Color
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.io.File
+
+          class App : Application() {
+              override fun onCreate() {
+                  super.onCreate()
+                  ctx = applicationContext
+                  Store.seed()
+                  // The accessibility service can build views before any activity runs.
+                  Ui.theme(ctx)
+              }
+
+              companion object {
+                  lateinit var ctx: Context
+              }
+          }
+
+          // A line of text on a pause screen.
+          // Position is an anchor band plus an alignment, never a free x/y fraction, so
+          // text can never end up underneath the challenge or the buttons.
+          class TextLayer {
+              var text = "New text"
+              var anchor = CENTER          // TOP / CENTER / BOTTOM band
+              var align = 1                // 0 left, 1 centre, 2 right
+              var size = 30f
+              var color = Color.WHITE
+              var font = "sans-serif"
+              var bold = false
+
+              fun toJson(): JSONObject {
+                  val o = JSONObject()
+                  o.put("text", text)
+                  o.put("anchor", anchor)
+                  o.put("align", align)
+                  o.put("size", size.toDouble())
+                  o.put("color", color)
+                  o.put("font", font)
+                  o.put("bold", bold)
+                  return o
+              }
+
+              companion object {
+                  const val TOP = 0
+                  const val CENTER = 1
+                  const val BOTTOM = 2
+
+                  fun of(text: String, anchor: Int, size: Float, color: Int, bold: Boolean): TextLayer {
+                      val t = TextLayer()
+                      t.text = text
+                      t.anchor = anchor
+                      t.size = size
+                      t.color = color
+                      t.bold = bold
+                      return t
+                  }
+
+                  fun fromJson(o: JSONObject): TextLayer {
+                      val t = TextLayer()
+                      t.text = o.optString("text", "")
+                      t.anchor = if (o.has("anchor")) {
+                          o.optInt("anchor", CENTER)
+                      } else {
+                          // migrate from the old free-position format
+                          val yp = o.optDouble("yp", 0.35)
+                          if (yp < 0.34) TOP else if (yp < 0.66) CENTER else BOTTOM
+                      }
+                      t.align = o.optInt("align", 1)
+                      t.size = o.optDouble("size", 30.0).toFloat()
+                      t.color = o.optInt("color", Color.WHITE)
+                      t.font = o.optString("font", "sans-serif")
+                      t.bold = o.optBoolean("bold", false)
+                      return t
+                  }
+              }
+          }
+
+          class Card {
+              var id = newId()
+              var name = "Untitled screen"
+              var bgColor = Color.parseColor("#141412")
+              var hasImage = false
+              var blur = 14
+              var dim = 30
+              var layers = ArrayList<TextLayer>()
+
+              fun toJson(): JSONObject {
+                  val o = JSONObject()
+                  o.put("id", id)
+                  o.put("name", name)
+                  o.put("bgColor", bgColor)
+                  o.put("hasImage", hasImage)
+                  o.put("blur", blur)
+                  o.put("dim", dim)
+                  val a = JSONArray()
+                  for (l in layers) a.put(l.toJson())
+                  o.put("layers", a)
+                  return o
+              }
+
+              companion object {
+                  fun newId(): String =
+                      System.currentTimeMillis().toString() + "_" + (1000..9999).random()
+
+                  fun fromJson(o: JSONObject): Card {
+                      val c = Card()
+                      c.id = o.optString("id", newId())
+                      c.name = o.optString("name", "Untitled screen")
+                      c.bgColor = o.optInt("bgColor", Color.parseColor("#141412"))
+                      c.hasImage = o.optBoolean("hasImage", false)
+                      c.blur = o.optInt("blur", 14)
+                      c.dim = o.optInt("dim", 30)
+                      val a = o.optJSONArray("layers") ?: JSONArray()
+                      for (i in 0 until a.length()) c.layers.add(TextLayer.fromJson(a.getJSONObject(i)))
+                      return c
+                  }
+              }
+          }
+
+          object Bg {
+              private var cacheId = ""
+              private var cacheBmp: Bitmap? = null
+              private var blurId = ""
+              private var blurAmount = -1
+              private var blurBmp: Bitmap? = null
+
+              fun file(id: String): File = File(App.ctx.filesDir, "card_$id.jpg")
+
+              fun clearCache(id: String) {
+                  if (cacheId == id) {
+                      cacheId = ""
+                      cacheBmp = null
+                  }
+                  if (blurId == id) {
+                      blurId = ""
+                      blurAmount = -1
+                      blurBmp = null
+                  }
+              }
+
+              fun original(id: String): Bitmap? {
+                  if (cacheId == id && cacheBmp != null) return cacheBmp
+                  val f = file(id)
+                  if (!f.exists()) return null
+                  val b = try {
+                      BitmapFactory.decodeFile(f.absolutePath)
+                  } catch (e: Throwable) {
+                      null
+                  } ?: return null
+                  cacheId = id
+                  cacheBmp = b
+                  return b
+              }
+
+              // Cached so that dragging the blur slider does not reallocate three bitmaps per tick.
+              fun blurred(id: String, amount: Int): Bitmap? {
+                  if (blurId == id && blurAmount == amount && blurBmp != null) return blurBmp
+                  val src = original(id) ?: return null
+                  if (amount <= 0) return src
+                  val out = try {
+                      val factor = 1f + amount * 1.1f
+                      val w = Math.max(3, (src.width / factor).toInt())
+                      val h = Math.max(3, (src.height / factor).toInt())
+                      val small = Bitmap.createScaledBitmap(src, w, h, true)
+                      val mid = Bitmap.createScaledBitmap(small, Math.max(3, w / 2), Math.max(3, h / 2), true)
+                      Bitmap.createScaledBitmap(mid, src.width, src.height, true)
+                  } catch (e: Throwable) {
+                      src
+                  }
+                  blurId = id
+                  blurAmount = amount
+                  blurBmp = out
+                  return out
+              }
+
+              // Files are written before the card is saved, so anything not referenced by a
+              // saved card is an orphan from an abandoned edit.
+              fun sweepOrphans() {
+                  try {
+                      val live = HashSet<String>()
+                      for (c in Store.cards()) if (c.hasImage) live.add("card_${c.id}.jpg")
+                      val files = App.ctx.filesDir.listFiles() ?: return
+                      for (f in files) {
+                          if (f.name.startsWith("card_") && f.name.endsWith(".jpg") && !live.contains(f.name)) {
+                              f.delete()
+                          }
+                      }
+                  } catch (e: Throwable) {
+                  }
+              }
+          }
+          PPEOF
+
+          echo "  app/src/main/java/com/waqt/Store.kt"
+          cat > app/src/main/java/com/waqt/Store.kt << 'PPEOF'
+          package com.waqt
+
+          import android.content.Context
+          import android.content.SharedPreferences
+          import android.graphics.Color
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.text.SimpleDateFormat
+          import java.util.Calendar
+          import java.util.Date
+          import java.util.Locale
+
+          object Store {
+
+              private val sp: SharedPreferences by lazy {
+                  App.ctx.getSharedPreferences("waqt", Context.MODE_PRIVATE)
+              }
+
+              private fun fmt(d: Date): String = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(d)
+              private fun today(): String = fmt(Date())
+
+              private fun obj(key: String): JSONObject = try {
+                  JSONObject(sp.getString(key, "{}") ?: "{}")
+              } catch (e: Throwable) {
+                  JSONObject()
+              }
+
+              private fun put(key: String, o: JSONObject) {
+                  sp.edit().putString(key, o.toString()).apply()
+              }
+
+              // ---- day rollover, archiving yesterday into history ----
+
+              fun rollDay() {
+                  val prev = sp.getString("day", "") ?: ""
+                  if (prev == today()) return
+                  if (prev.isNotEmpty()) {
+                      val hist = obj("hist")
+                      val entry = JSONObject()
+                      entry.put("o", opensRaw())
+                      entry.put("b", sp.getInt("goBacks", 0))
+                      hist.put(prev, entry)
+                      trim(hist)
+                      put("hist", hist)
+                  }
+                  sp.edit()
+                      .putString("day", today())
+                      .putString("opens", "{}")
+                      .putInt("goBacks", 0)
+                      .putInt("passUsed", 0)
+                      .apply()
+              }
+
+              private fun trim(hist: JSONObject) {
+                  val keys = ArrayList<String>()
+                  val it = hist.keys()
+                  while (it.hasNext()) keys.add(it.next())
+                  keys.sort()
+                  while (keys.size > 30) {
+                      hist.remove(keys.removeAt(0))
+                  }
+              }
+
+              private fun opensRaw(): Int {
+                  val o = obj("opens")
+                  var total = 0
+                  val it = o.keys()
+                  while (it.hasNext()) total += o.optInt(it.next(), 0)
+                  return total
+              }
+
+              class Day(val label: String, val opens: Int, val backs: Int, val isToday: Boolean)
+
+              // Last seven days, oldest first, for the bar strip on the home screen.
+              fun lastSevenDays(): List<Day> {
+                  rollDay()
+                  val hist = obj("hist")
+                  val out = ArrayList<Day>()
+                  val cal = Calendar.getInstance()
+                  cal.add(Calendar.DAY_OF_YEAR, -6)
+                  val letters = SimpleDateFormat("EEEEE", Locale.US)
+                  for (i in 0..6) {
+                      val key = fmt(cal.time)
+                      val label = letters.format(cal.time)
+                      if (key == today()) {
+                          out.add(Day(label, opensToday(), goBacks(), true))
+                      } else {
+                          val e = hist.optJSONObject(key)
+                          out.add(Day(label, e?.optInt("o", 0) ?: 0, e?.optInt("b", 0) ?: 0, false))
+                      }
+                      cal.add(Calendar.DAY_OF_YEAR, 1)
+                  }
+                  return out
+              }
+
+              // ---- theme ----
+
+              const val THEME_SYSTEM = 0
+              const val THEME_LIGHT = 1
+              const val THEME_DARK = 2
+
+              fun themeMode(): Int = sp.getInt("theme", THEME_SYSTEM)
+              fun setThemeMode(v: Int) = sp.edit().putInt("theme", v).apply()
+
+              // ---- global settings ----
+
+              fun enabled(): Boolean = sp.getBoolean("enabled", true)
+              fun setEnabled(v: Boolean) = sp.edit().putBoolean("enabled", v).apply()
+
+              fun guarded(): MutableSet<String> = HashSet(sp.getStringSet("guarded", HashSet()) ?: HashSet())
+              fun setGuarded(s: Set<String>) = sp.edit().putStringSet("guarded", HashSet(s)).apply()
+
+              fun preWait(): Int = sp.getInt("preWait", 5)
+              fun setPreWait(v: Int) = sp.edit().putInt("preWait", v).apply()
+
+              fun midMinutes(): Int = sp.getInt("mid", 8)
+              fun setMidMinutes(v: Int) = sp.edit().putInt("mid", v).apply()
+
+              fun graceMinutes(): Int = sp.getInt("grace", 2)
+              fun setGraceMinutes(v: Int) = sp.edit().putInt("grace", v).apply()
+
+              fun escalate(): Boolean = sp.getBoolean("esc", true)
+              fun setEscalate(v: Boolean) = sp.edit().putBoolean("esc", v).apply()
+
+              fun passesPerDay(): Int = sp.getInt("passes", 3)
+              fun setPassesPerDay(v: Int) = sp.edit().putInt("passes", v).apply()
+
+              // ---- counters ----
+
+              fun opensOf(pkg: String): Int {
+                  rollDay()
+                  return obj("opens").optInt(pkg, 0)
+              }
+
+              fun bumpOpen(pkg: String): Int {
+                  rollDay()
+                  val o = obj("opens")
+                  val n = o.optInt(pkg, 0) + 1
+                  o.put(pkg, n)
+                  put("opens", o)
+                  return n
+              }
+
+              fun opensToday(): Int {
+                  rollDay()
+                  return opensRaw()
+              }
+
+              fun goBacks(): Int {
+                  rollDay()
+                  return sp.getInt("goBacks", 0)
+              }
+
+              fun bumpGoBack() {
+                  rollDay()
+                  sp.edit().putInt("goBacks", sp.getInt("goBacks", 0) + 1).apply()
+              }
+
+              // ---- grace window ----
+              //
+              // Leaving an app normally starts a short free re-entry window. Refusing at the
+              // pause screen must NOT, or every refusal would hand back free access. The deny
+              // stamp wins over the leave stamp for the length of the grace window.
+
+              fun markLeft(pkg: String) {
+                  if (deniedRecently(pkg)) return
+                  val o = obj("left")
+                  o.put(pkg, System.currentTimeMillis())
+                  put("left", o)
+              }
+
+              fun markDenied(pkg: String) {
+                  val o = obj("denied")
+                  o.put(pkg, System.currentTimeMillis())
+                  put("denied", o)
+                  val l = obj("left")
+                  l.remove(pkg)
+                  put("left", l)
+              }
+
+              private fun deniedRecently(pkg: String): Boolean {
+                  val t = obj("denied").optLong(pkg, 0L)
+                  return t > 0L && System.currentTimeMillis() - t < Math.max(60000L, graceMinutes() * 60000L)
+              }
+
+              fun inGrace(pkg: String): Boolean {
+                  if (graceMinutes() <= 0) return false
+                  if (deniedRecently(pkg)) return false
+                  val t = obj("left").optLong(pkg, 0L)
+                  return t > 0L && System.currentTimeMillis() - t < graceMinutes() * 60000L
+              }
+
+              // ---- work passes ----
+
+              fun passesLeft(): Int {
+                  rollDay()
+                  return Math.max(0, passesPerDay() - sp.getInt("passUsed", 0))
+              }
+
+              fun startPass(pkg: String) {
+                  rollDay()
+                  sp.edit()
+                      .putInt("passUsed", sp.getInt("passUsed", 0) + 1)
+                      .putString("passPkg", pkg)
+                      .putLong("passEnd", System.currentTimeMillis() + 15 * 60000L)
+                      .apply()
+              }
+
+              fun passActive(pkg: String): Boolean =
+                  sp.getString("passPkg", "") == pkg && System.currentTimeMillis() < sp.getLong("passEnd", 0L)
+
+              // ---- active hours ----
+
+              fun winOn(): Boolean = sp.getBoolean("winOn", false)
+              fun winStart(): Int = sp.getInt("winStart", 9 * 60)
+              fun winEnd(): Int = sp.getInt("winEnd", 18 * 60)
+              fun winInvert(): Boolean = sp.getBoolean("winInv", false)
+
+              fun setWin(key: String, value: Int) {
+                  when (key) {
+                      "on" -> sp.edit().putBoolean("winOn", value == 1).apply()
+                      "start" -> sp.edit().putInt("winStart", value).apply()
+                      "end" -> sp.edit().putInt("winEnd", value).apply()
+                      "inv" -> sp.edit().putBoolean("winInv", value == 1).apply()
+                  }
+              }
+
+              fun globalHours(): IntArray = intArrayOf(
+                  if (winOn()) 1 else 0, winStart(), winEnd(), if (winInvert()) 1 else 0
+              )
+
+              // ---- per-app overrides ----
+
+              fun rule(pkg: String): JSONObject = obj("rules").optJSONObject(pkg) ?: JSONObject()
+
+              private fun putRule(pkg: String, r: JSONObject) {
+                  val all = obj("rules")
+                  all.put(pkg, r)
+                  put("rules", all)
+              }
+
+              fun customTiming(pkg: String): Boolean = rule(pkg).optBoolean("ct", false)
+              fun customHours(pkg: String): Boolean = rule(pkg).optBoolean("ch", false)
+              fun isCustom(pkg: String): Boolean = customTiming(pkg) || customHours(pkg)
+
+              fun setCustomTiming(pkg: String, on: Boolean) {
+                  val r = rule(pkg)
+                  r.put("ct", on)
+                  if (on) {
+                      if (!r.has("preWait")) r.put("preWait", preWait())
+                      if (!r.has("mid")) r.put("mid", midMinutes())
+                  }
+                  putRule(pkg, r)
+              }
+
+              fun setCustomHours(pkg: String, on: Boolean) {
+                  val r = rule(pkg)
+                  r.put("ch", on)
+                  if (on) {
+                      if (!r.has("wOn")) r.put("wOn", true)
+                      if (!r.has("wStart")) r.put("wStart", winStart())
+                      if (!r.has("wEnd")) r.put("wEnd", winEnd())
+                      if (!r.has("wInv")) r.put("wInv", winInvert())
+                  }
+                  putRule(pkg, r)
+              }
+
+              fun setRuleInt(pkg: String, key: String, value: Int) {
+                  val r = rule(pkg)
+                  r.put(key, value)
+                  putRule(pkg, r)
+              }
+
+              fun setAppWin(pkg: String, key: String, value: Int) {
+                  val r = rule(pkg)
+                  when (key) {
+                      "on" -> r.put("wOn", value == 1)
+                      "start" -> r.put("wStart", value)
+                      "end" -> r.put("wEnd", value)
+                      "inv" -> r.put("wInv", value == 1)
+                  }
+                  putRule(pkg, r)
+              }
+
+              fun appHours(pkg: String): IntArray {
+                  val r = rule(pkg)
+                  if (!r.optBoolean("ch", false)) return globalHours()
+                  return intArrayOf(
+                      if (r.optBoolean("wOn", true)) 1 else 0,
+                      r.optInt("wStart", winStart()),
+                      r.optInt("wEnd", winEnd()),
+                      if (r.optBoolean("wInv", false)) 1 else 0
+                  )
+              }
+
+              fun preWaitFor(pkg: String): Int {
+                  val r = rule(pkg)
+                  return if (r.optBoolean("ct", false)) r.optInt("preWait", preWait()) else preWait()
+              }
+
+              fun midMinutesFor(pkg: String): Int {
+                  val r = rule(pkg)
+                  return if (r.optBoolean("ct", false)) r.optInt("mid", midMinutes()) else midMinutes()
+              }
+
+              fun activeNow(pkg: String): Boolean {
+                  val h = appHours(pkg)
+                  if (h[0] == 0) return true
+                  val cal = Calendar.getInstance()
+                  val now = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+                  val start = h[1]
+                  val end = h[2]
+                  val inside = if (start == end) {
+                      true
+                  } else if (start < end) {
+                      now >= start && now < end
+                  } else {
+                      now >= start || now < end
+                  }
+                  return if (h[3] == 1) !inside else inside
+              }
+
+              // One-line human summary of an app's rule, shown under its name in the list.
+              fun ruleSummary(pkg: String): String {
+                  val h = appHours(pkg)
+                  val when_ = if (h[0] == 0) {
+                      "All day"
+                  } else if (h[3] == 1) {
+                      "Outside " + fmtTime(h[1]) + "\u2013" + fmtTime(h[2])
+                  } else {
+                      fmtTime(h[1]) + "\u2013" + fmtTime(h[2])
+                  }
+                  val m = midMinutesFor(pkg)
+                  val every = if (m <= 0) "opening only" else "every $m min"
+                  return "$when_ \u00b7 $every"
+              }
+
+              fun fmtTime(mins: Int): String {
+                  val total = ((mins % 1440) + 1440) % 1440
+                  val h24 = total / 60
+                  val m = total % 60
+                  val suffix = if (h24 < 12) "AM" else "PM"
+                  var h = h24 % 12
+                  if (h == 0) h = 12
+                  return h.toString() + (if (m == 0) "" else ":" + (if (m < 10) "0" else "") + m) + " " + suffix
+              }
+
+              // ---- pause screens ----
+
+              fun cards(): ArrayList<Card> {
+                  val list = ArrayList<Card>()
+                  try {
+                      val a = JSONArray(sp.getString("cards", "[]") ?: "[]")
+                      for (i in 0 until a.length()) list.add(Card.fromJson(a.getJSONObject(i)))
+                  } catch (e: Throwable) {
+                  }
+                  return list
+              }
+
+              fun saveCards(list: List<Card>) {
+                  val a = JSONArray()
+                  for (c in list) a.put(c.toJson())
+                  sp.edit().putString("cards", a.toString()).apply()
+              }
+
+              fun pickCard(): Card {
+                  val list = cards()
+                  if (list.isEmpty()) return defaults()[0]
+                  return list[(0 until list.size).random()]
+              }
+
+              fun seed() {
+                  if (sp.contains("cards")) return
+                  saveCards(defaults())
+              }
+
+              private fun defaults(): ArrayList<Card> {
+                  val list = ArrayList<Card>()
+
+                  val a = Card()
+                  a.name = "The niyat"
+                  a.bgColor = Color.parseColor("#141412")
+                  a.layers.add(TextLayer.of("What is your niyat?", TextLayer.CENTER, 32f, Color.parseColor("#FAFAF7"), true))
+                  a.layers.add(TextLayer.of("If there is no answer, there is no reason.", TextLayer.CENTER, 15f, Color.parseColor("#8E8E86"), false))
+                  list.add(a)
+
+                  val b = Card()
+                  b.name = "The blessing"
+                  b.bgColor = Color.parseColor("#0F1A17")
+                  b.layers.add(TextLayer.of("Health and free time.", TextLayer.CENTER, 30f, Color.parseColor("#FAFAF7"), true))
+                  b.layers.add(TextLayer.of("Two blessings, easily spent.", TextLayer.CENTER, 15f, Color.parseColor("#89A79B"), false))
+                  list.add(b)
+
+                  val c = Card()
+                  c.name = "The cost"
+                  c.bgColor = Color.parseColor("#191219")
+                  c.layers.add(TextLayer.of("This is twenty minutes.", TextLayer.CENTER, 30f, Color.parseColor("#FAFAF7"), true))
+                  c.layers.add(TextLayer.of("It always is.", TextLayer.CENTER, 17f, Color.parseColor("#C0A6B4"), false))
+                  list.add(c)
+
+                  val d = Card()
+                  d.name = "The work"
+                  d.bgColor = Color.parseColor("#1C1710")
+                  d.layers.add(TextLayer.of("Your work, or the feed?", TextLayer.CENTER, 30f, Color.parseColor("#FAFAF7"), true))
+                  d.layers.add(TextLayer.of("Both live behind this icon. Pick one on purpose.", TextLayer.CENTER, 15f, Color.parseColor("#B39B72"), false))
+                  list.add(d)
+
+                  val e = Card()
+                  e.name = "The hand"
+                  e.bgColor = Color.parseColor("#16131F")
+                  e.layers.add(TextLayer.of("Your thumb got here before you did.", TextLayer.CENTER, 28f, Color.parseColor("#FAFAF7"), true))
+                  list.add(e)
+
+                  return list
+              }
+          }
+          PPEOF
+
+          echo "  app/src/main/java/com/waqt/Theme.kt"
+          cat > app/src/main/java/com/waqt/Theme.kt << 'PPEOF'
+          package com.waqt
+
+          import android.content.Context
+          import android.content.res.Configuration
+
+          object Theme {
+
+              fun isDark(c: Context): Boolean = when (Store.themeMode()) {
+                  Store.THEME_LIGHT -> false
+                  Store.THEME_DARK -> true
+                  else -> followingSystem(c)
+              }
+
+              private fun followingSystem(c: Context): Boolean {
+                  val mode = c.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
+                  return mode == Configuration.UI_MODE_NIGHT_YES
+              }
+
+              fun label(mode: Int): String = when (mode) {
+                  Store.THEME_LIGHT -> "Light"
+                  Store.THEME_DARK -> "Dark"
+                  else -> "System"
+              }
+          }
+          PPEOF
+
+          echo "  app/src/main/java/com/waqt/Ui.kt"
+          cat > app/src/main/java/com/waqt/Ui.kt << 'PPEOF'
+          package com.waqt
+
+          import android.app.Activity
+          import android.app.TimePickerDialog
+          import android.content.Context
+          import android.content.Intent
+          import android.content.res.ColorStateList
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.util.TypedValue
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.Button
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.SeekBar
+          import android.widget.TextView
+
+          object Ui {
+
+              // Tokens. Set by theme() before any view is built.
+              var BG = 0
+              var CARD = 0
+              var TEXT = 0
+              var MUTED = 0
+              var LINE = 0
+              var TRACK = 0
+              var INK = 0        // primary button fill / switch on
+              var ON_INK = 0     // text on INK
+              var ACCENT = Color.parseColor("#E8593A")
+              var GOOD = Color.parseColor("#2E9E6B")
+              var dark = false
+
+              const val MP = ViewGroup.LayoutParams.MATCH_PARENT
+              const val WC = ViewGroup.LayoutParams.WRAP_CONTENT
+
+              fun theme(c: Context) {
+                  dark = Theme.isDark(c)
+                  if (dark) {
+                      BG = Color.parseColor("#0F0F0E")
+                      CARD = Color.parseColor("#1A1A18")
+                      TEXT = Color.parseColor("#FAFAF7")
+                      MUTED = Color.parseColor("#8E8E86")
+                      LINE = Color.parseColor("#2A2A27")
+                      TRACK = Color.parseColor("#2E2E2A")
+                      INK = Color.parseColor("#FAFAF7")
+                      ON_INK = Color.parseColor("#12120F")
+                  } else {
+                      BG = Color.parseColor("#F2F1EE")
+                      CARD = Color.parseColor("#FFFFFF")
+                      TEXT = Color.parseColor("#12120F")
+                      MUTED = Color.parseColor("#8A8A82")
+                      LINE = Color.parseColor("#E4E3DE")
+                      TRACK = Color.parseColor("#E4E3DE")
+                      INK = Color.parseColor("#12120F")
+                      ON_INK = Color.parseColor("#FFFFFF")
+                  }
+              }
+
+              fun dp(v: Int): Int = Math.round(v * App.ctx.resources.displayMetrics.density)
+
+              fun rounded(color: Int, radius: Int, strokeW: Int = 0, strokeC: Int = 0): GradientDrawable {
+                  val d = GradientDrawable()
+                  d.setColor(color)
+                  d.cornerRadius = dp(radius).toFloat()
+                  if (strokeW > 0) d.setStroke(dp(strokeW), strokeC)
+                  return d
+              }
+
+              fun col(c: Context): LinearLayout {
+                  val l = LinearLayout(c)
+                  l.orientation = LinearLayout.VERTICAL
+                  return l
+              }
+
+              fun row(c: Context): LinearLayout {
+                  val l = LinearLayout(c)
+                  l.orientation = LinearLayout.HORIZONTAL
+                  l.gravity = Gravity.CENTER_VERTICAL
+                  return l
+              }
+
+              fun text(c: Context, s: String, size: Float = 15f, color: Int = TEXT, bold: Boolean = false): TextView {
+                  val t = TextView(c)
+                  t.text = s
+                  t.setTextSize(TypedValue.COMPLEX_UNIT_SP, size)
+                  t.setTextColor(color)
+                  t.setLineSpacing(dp(3).toFloat(), 1f)
+                  t.typeface = Typeface.create(if (bold) "sans-serif-medium" else "sans-serif", Typeface.NORMAL)
+                  if (size >= 20f) t.letterSpacing = -0.02f
+                  return t
+              }
+
+              fun title(c: Context, s: String): TextView = text(c, s, 26f, TEXT, true)
+
+              fun eyebrow(c: Context, s: String): TextView {
+                  val t = text(c, s.uppercase(), 10f, MUTED, true)
+                  t.letterSpacing = 0.12f
+                  return t
+              }
+
+              // Big display number for the home stat.
+              fun display(c: Context, s: String): TextView {
+                  val t = TextView(c)
+                  t.text = s
+                  t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 52f)
+                  t.setTextColor(TEXT)
+                  t.letterSpacing = -0.04f
+                  t.includeFontPadding = false
+                  t.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                  return t
+              }
+
+              fun button(c: Context, s: String, primary: Boolean = false, onClick: () -> Unit): Button {
+                  val b = Button(c)
+                  b.text = s
+                  b.isAllCaps = false
+                  b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                  b.setTextColor(if (primary) ON_INK else TEXT)
+                  b.background = rounded(if (primary) INK else CARD, 16, if (primary) 0 else 1, LINE)
+                  b.setPadding(dp(18), dp(15), dp(18), dp(15))
+                  b.minHeight = 0
+                  b.minWidth = 0
+                  b.stateListAnimator = null
+                  b.elevation = 0f
+                  b.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                  b.setOnClickListener { onClick() }
+                  return b
+              }
+
+              fun panel(c: Context): LinearLayout {
+                  val l = col(c)
+                  l.background = rounded(CARD, 20)
+                  l.setPadding(dp(16), dp(15), dp(16), dp(16))
+                  return l
+              }
+
+              fun lp(w: Int, h: Int, top: Int = 0): LinearLayout.LayoutParams {
+                  val p = LinearLayout.LayoutParams(w, h)
+                  p.topMargin = dp(top)
+                  return p
+              }
+
+              fun weighted(): LinearLayout.LayoutParams = LinearLayout.LayoutParams(0, WC, 1f)
+
+              fun gap(c: Context, w: Int): View {
+                  val v = View(c)
+                  v.layoutParams = LinearLayout.LayoutParams(dp(w), dp(1))
+                  return v
+              }
+
+              fun hairline(c: Context): View {
+                  val v = View(c)
+                  v.setBackgroundColor(LINE)
+                  return v
+              }
+
+              // ---- pill toggle (replaces the platform Switch) ----
+
+              fun pillLp(): LinearLayout.LayoutParams = LinearLayout.LayoutParams(dp(46), dp(28))
+
+              fun pill(c: Context, on: Boolean, onChange: (Boolean) -> Unit): FrameLayout {
+                  val track = FrameLayout(c)
+                  val knob = View(c)
+                  var state = on
+                  val travel = dp(46 - 22 - 6).toFloat()
+
+                  fun paint(animate: Boolean) {
+                      track.background = rounded(if (state) INK else TRACK, 14)
+                      val d = GradientDrawable()
+                      d.shape = GradientDrawable.OVAL
+                      d.setColor(if (state) ON_INK else CARD)
+                      knob.background = d
+                      if (animate) {
+                          knob.animate().translationX(if (state) travel else 0f).setDuration(140).start()
+                      } else {
+                          knob.translationX = if (state) travel else 0f
+                      }
+                  }
+
+                  val klp = FrameLayout.LayoutParams(dp(22), dp(22))
+                  klp.leftMargin = dp(3)
+                  klp.topMargin = dp(3)
+                  track.addView(knob, klp)
+                  paint(false)
+                  track.setOnClickListener {
+                      state = !state
+                      paint(true)
+                      onChange(state)
+                  }
+                  return track
+              }
+
+              fun pillRow(
+                  c: Context,
+                  parent: LinearLayout,
+                  title: String,
+                  sub: String,
+                  value: Boolean,
+                  topGap: Int,
+                  onChange: (Boolean) -> Unit
+              ) {
+                  val row = row(c)
+                  val stack = col(c)
+                  stack.addView(text(c, title, 15f, TEXT, true))
+                  if (sub.isNotEmpty()) stack.addView(text(c, sub, 12f, MUTED), lp(MP, WC, 2))
+                  row.addView(stack, weighted())
+                  row.addView(pill(c, value, onChange), pillLp())
+                  parent.addView(row, lp(MP, WC, topGap))
+              }
+
+              // ---- segmented control (theme picker, text anchor, alignment) ----
+
+              fun segmented(
+                  c: Context,
+                  options: Array<String>,
+                  selected: Int,
+                  onPick: (Int) -> Unit
+              ): LinearLayout {
+                  val bar = row(c)
+                  bar.background = rounded(TRACK, 14)
+                  bar.setPadding(dp(3), dp(3), dp(3), dp(3))
+                  val chips = ArrayList<TextView>()
+
+                  fun paint(index: Int) {
+                      for (i in chips.indices) {
+                          val on = i == index
+                          chips[i].background = if (on) rounded(CARD, 11) else null
+                          chips[i].setTextColor(if (on) TEXT else MUTED)
+                          chips[i].typeface =
+                              Typeface.create(if (on) "sans-serif-medium" else "sans-serif", Typeface.NORMAL)
+                      }
+                  }
+
+                  for (i in options.indices) {
+                      val t = text(c, options[i], 13f, MUTED)
+                      t.gravity = Gravity.CENTER
+                      t.setPadding(dp(6), dp(9), dp(6), dp(9))
+                      t.setOnClickListener {
+                          paint(i)
+                          onPick(i)
+                      }
+                      chips.add(t)
+                      bar.addView(t, LinearLayout.LayoutParams(0, WC, 1f))
+                  }
+                  paint(selected)
+                  return bar
+              }
+
+              // ---- slider ----
+
+              fun slider(
+                  parent: LinearLayout,
+                  title: String,
+                  min: Int,
+                  max: Int,
+                  value: Int,
+                  fmt: (Int) -> String,
+                  onSet: (Int) -> Unit
+              ) {
+                  val c = parent.context
+                  val head = row(c)
+                  val name = text(c, title, 15f, TEXT)
+                  val v = text(c, fmt(value), 14f, TEXT, true)
+                  head.addView(name, weighted())
+                  head.addView(v)
+                  parent.addView(head, lp(MP, WC, 18))
+
+                  val sb = SeekBar(c)
+                  sb.max = max - min
+                  sb.progress = value - min
+                  sb.setPadding(dp(2), dp(8), dp(2), dp(2))
+                  sb.progressTintList = ColorStateList.valueOf(INK)
+                  sb.thumbTintList = ColorStateList.valueOf(INK)
+                  sb.progressBackgroundTintList = ColorStateList.valueOf(TRACK)
+                  sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                          v.text = fmt(p + min)
+                          if (fromUser) onSet(p + min)
+                      }
+
+                      override fun onStartTrackingTouch(s: SeekBar?) {}
+                      override fun onStopTrackingTouch(s: SeekBar?) {}
+                  })
+                  parent.addView(sb, lp(MP, WC, 2))
+              }
+
+              // ---- bottom tab bar ----
+
+              fun tabs(act: Activity, current: Int): LinearLayout {
+                  val bar = row(act)
+                  bar.background = rounded(CARD, 22)
+                  bar.setPadding(dp(6), dp(6), dp(6), dp(6))
+                  val labels = arrayOf("Today", "Apps", "Screens", "Settings")
+                  val targets = arrayOf(
+                      MainActivity::class.java,
+                      AppsActivity::class.java,
+                      CardsActivity::class.java,
+                      SettingsActivity::class.java
+                  )
+                  for (i in labels.indices) {
+                      val on = i == current
+                      val t = text(act, labels[i], 13f, if (on) ON_INK else MUTED, on)
+                      t.gravity = Gravity.CENTER
+                      t.setPadding(dp(4), dp(11), dp(4), dp(11))
+                      if (on) t.background = rounded(INK, 16)
+                      t.setOnClickListener { go(act, targets[i]) }
+                      bar.addView(t, LinearLayout.LayoutParams(0, WC, 1f))
+                  }
+                  return bar
+              }
+
+              private fun go(act: Activity, target: Class<*>) {
+                  if (act.javaClass == target) return
+                  if (target == MainActivity::class.java) {
+                      act.finish()
+                  } else {
+                      act.startActivity(Intent(act, target))
+                      if (act !is MainActivity) act.finish()
+                  }
+                  act.overridePendingTransition(0, 0)
+              }
+
+              // ---- active-hours editor, shared by settings and per-app rules ----
+              // get() returns [on, startMinute, endMinute, invert]; set(key, value) persists one field.
+
+              fun hoursBlock(
+                  act: Activity,
+                  panel: LinearLayout,
+                  get: () -> IntArray,
+                  set: (String, Int) -> Unit
+              ) {
+                  val onRow = row(act)
+                  onRow.addView(text(act, "Only guard during set hours", 15f, TEXT, true), weighted())
+                  var refreshBody: (() -> Unit)? = null
+                  onRow.addView(pill(act, get()[0] == 1) {
+                      set("on", if (it) 1 else 0)
+                      refreshBody?.invoke()
+                  }, pillLp())
+                  panel.addView(onRow, lp(MP, WC, 18))
+                  refreshBody = hoursBody(act, panel, get, set)
+              }
+
+              // The time pickers and the flip switch, with no enable toggle of its own.
+              // Per-app rules supply that toggle themselves, so there are never two
+              // switches on screen that look like they do the same thing.
+              fun hoursBody(
+                  act: Activity,
+                  panel: LinearLayout,
+                  get: () -> IntArray,
+                  set: (String, Int) -> Unit
+              ): () -> Unit {
+                  var refresh: (() -> Unit)? = null
+
+                  val body = col(act)
+                  panel.addView(body, lp(MP, WC, 0))
+
+                  val timeRow = row(act)
+                  body.addView(timeRow, lp(MP, WC, 12))
+
+                  val summary = text(act, "", 12f, MUTED)
+                  body.addView(summary, lp(MP, WC, 14))
+
+                  val invRow = row(act)
+                  invRow.addView(text(act, "Flip it around", 15f, TEXT, true), weighted())
+                  invRow.addView(pill(act, get()[3] == 1) {
+                      set("inv", if (it) 1 else 0)
+                      refresh?.invoke()
+                  }, pillLp())
+                  body.addView(invRow, lp(MP, WC, 16))
+
+                  fun pick(current: Int, apply: (Int) -> Unit) {
+                      try {
+                          TimePickerDialog(
+                              act,
+                              { _, hh, mm -> apply(hh * 60 + mm); refresh?.invoke() },
+                              current / 60,
+                              current % 60,
+                              false
+                          ).show()
+                      } catch (e: Throwable) {
+                      }
+                  }
+
+                  val fromBtn = button(act, "") { pick(get()[1]) { set("start", it) } }
+                  val toBtn = button(act, "") { pick(get()[2]) { set("end", it) } }
+                  timeRow.addView(fromBtn, weighted())
+                  timeRow.addView(gap(act, 10))
+                  timeRow.addView(toBtn, weighted())
+
+                  val paint: () -> Unit = {
+                      val g = get()
+                      body.visibility = if (g[0] == 1) View.VISIBLE else View.GONE
+                      fromBtn.text = "From " + Store.fmtTime(g[1])
+                      toBtn.text = "To " + Store.fmtTime(g[2])
+                      summary.text = if (g[3] == 1) {
+                          "Guarded apps open freely between " + Store.fmtTime(g[1]) + " and " +
+                                  Store.fmtTime(g[2]) + ". Pause screens run the rest of the day."
+                      } else {
+                          "Pause screens run between " + Store.fmtTime(g[1]) + " and " +
+                                  Store.fmtTime(g[2]) + ". Outside that, guarded apps open freely."
+                      }
+                  }
+
+                  refresh = paint
+                  paint.invoke()
+                  return paint
+              }
+          }
+          PPEOF
+
+          echo "  app/src/main/java/com/waqt/Base.kt"
+          cat > app/src/main/java/com/waqt/Base.kt << 'PPEOF'
+          package com.waqt
+
+          import android.app.Activity
+          import android.os.Bundle
+          import android.view.View
+          import android.view.WindowManager
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+
+          // Every screen goes through here so the theme is resolved once, before any view
+          // is constructed, and so a theme change picked up in Settings (or from the system
+          // while the app is backgrounded) rebuilds the screen on the way back.
+          abstract class Base : Activity() {
+
+              private var appliedDark = false
+
+              override fun onCreate(saved: Bundle?) {
+                  appliedDark = Theme.isDark(this)
+                  setTheme(
+                      if (appliedDark) android.R.style.Theme_Material_NoActionBar
+                      else android.R.style.Theme_Material_Light_NoActionBar
+                  )
+                  super.onCreate(saved)
+                  Ui.theme(this)
+                  paintSystemBars()
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  if (Theme.isDark(this) != appliedDark) recreate()
+              }
+
+              private fun paintSystemBars() {
+                  try {
+                      // Resize rather than pan: the scaffold's ScrollView takes the squeeze,
+                      // so a keyboard never lands on top of a field or the tab bar.
+                      window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                      window.statusBarColor = Ui.BG
+                      window.navigationBarColor = Ui.BG
+                      var flags = window.decorView.systemUiVisibility
+                      flags = if (Ui.dark) {
+                          flags and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv() and
+                                  View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR.inv()
+                      } else {
+                          flags or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or
+                                  View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+                      }
+                      window.decorView.systemUiVisibility = flags
+                  } catch (e: Throwable) {
+                  }
+              }
+
+              // Scrolling content column with a pinned tab bar underneath.
+              // Pass tab = -1 for sub-screens that should not show tabs.
+              protected fun scaffold(tab: Int): LinearLayout {
+                  val outer = Ui.col(this)
+                  outer.setBackgroundColor(Ui.BG)
+
+                  val scroll = ScrollView(this)
+                  scroll.isFillViewport = true
+                  scroll.clipToPadding = false
+
+                  val content = Ui.col(this)
+                  content.setPadding(Ui.dp(16), Ui.dp(20), Ui.dp(16), Ui.dp(24))
+                  scroll.addView(content)
+                  outer.addView(scroll, LinearLayout.LayoutParams(Ui.MP, 0, 1f))
+
+                  if (tab >= 0) {
+                      val holder = Ui.col(this)
+                      holder.setPadding(Ui.dp(12), 0, Ui.dp(12), Ui.dp(12))
+                      holder.addView(Ui.tabs(this, tab), Ui.lp(Ui.MP, Ui.WC, 0))
+                      outer.addView(holder, Ui.lp(Ui.MP, Ui.WC, 0))
+                  }
+
+                  setContentView(outer)
+                  return content
+              }
+
+              // Header row used by sub-screens: back chevron plus title.
+              protected fun header(content: LinearLayout, titleText: String, sub: String) {
+                  val row = Ui.row(this)
+                  val back = Ui.text(this, "\u2039", 30f, Ui.TEXT, true)
+                  back.setPadding(0, 0, Ui.dp(14), Ui.dp(4))
+                  back.setOnClickListener { finish() }
+                  row.addView(back)
+                  val stack = Ui.col(this)
+                  stack.addView(Ui.title(this, titleText))
+                  if (sub.isNotEmpty()) stack.addView(Ui.text(this, sub, 13f, Ui.MUTED), Ui.lp(Ui.MP, Ui.WC, 2))
+                  row.addView(stack, Ui.weighted())
+                  content.addView(row, Ui.lp(Ui.MP, Ui.WC, 0))
+              }
+          }
+          PPEOF
+
+          echo "  app/src/main/java/com/waqt/Challenges.kt"
+          cat > app/src/main/java/com/waqt/Challenges.kt << 'PPEOF'
+          package com.waqt
+
+          import android.content.Context
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Handler
+          import android.os.Looper
+          import android.util.TypedValue
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.ProgressBar
+          import android.widget.SeekBar
+          import android.widget.TextView
+          import java.util.Random
+
+          // Every challenge is tap-, hold- or swipe-driven. Nothing here opens the system
+          // keyboard: an IME over a TYPE_APPLICATION_OVERLAY window is unreliable across
+          // OEMs and was the source of the overlapping layout.
+          object Challenges {
+
+              private val rnd = Random()
+              private val h = Handler(Looper.getMainLooper())
+
+              private val CHIP = Color.parseColor("#2BFFFFFF")
+              private val CHIP_LINE = Color.parseColor("#33FFFFFF")
+              private val CHIP_ON = Color.parseColor("#FAFAF7")
+              private val CHIP_ON_TEXT = Color.parseColor("#12120F")
+              private val FG = Color.parseColor("#FAFAF7")
+              private val FG_SOFT = Color.parseColor("#99FFFFFF")
+
+              private val WORDS = arrayOf(
+                  "deliberate", "afterwards", "attention", "elsewhere", "tomorrow",
+                  "unfinished", "somewhere", "gradually", "remaining", "otherwise",
+                  "important", "carefully", "beginning", "difficult", "returning"
+              )
+
+              private val DIRS = arrayOf("LEFT", "RIGHT", "UP", "DOWN")
+
+              // Called when the overlay tears down, so a hold timer or reset callback from a
+              // dismissed challenge can never fire and unlock a later screen.
+              fun cancelAll() {
+                  h.removeCallbacksAndMessages(null)
+              }
+
+              fun make(ctx: Context, level: Int, onOk: () -> Unit): Pair<String, View> {
+                  return when (rnd.nextInt(6)) {
+                      0 -> order(ctx, level, onOk)
+                      1 -> swipe(ctx, level, onOk)
+                      2 -> hold(ctx, level, onOk)
+                      3 -> spell(ctx, level, onOk)
+                      4 -> math(ctx, level, onOk)
+                      else -> slider(ctx, level, onOk)
+                  }
+              }
+
+              // ---- shared pieces ----
+
+              private fun stage(c: Context, heightDp: Int): FrameLayout {
+                  val f = FrameLayout(c)
+                  f.layoutParams = LinearLayout.LayoutParams(Ui.MP, Ui.dp(heightDp))
+                  return f
+              }
+
+              private fun key(c: Context, label: String, sizeSp: Float = 18f): TextView {
+                  val t = TextView(c)
+                  t.text = label
+                  t.gravity = Gravity.CENTER
+                  t.setTextColor(FG)
+                  t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
+                  t.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                  t.background = Ui.rounded(CHIP, 12, 1, CHIP_LINE)
+                  return t
+              }
+
+              private fun setKeyOn(t: TextView, on: Boolean) {
+                  if (on) {
+                      t.background = Ui.rounded(CHIP_ON, 12)
+                      t.setTextColor(CHIP_ON_TEXT)
+                  } else {
+                      t.background = Ui.rounded(CHIP, 12, 1, CHIP_LINE)
+                      t.setTextColor(FG)
+                  }
+              }
+
+              private fun circle(c: Context, label: String): TextView {
+                  val t = TextView(c)
+                  t.text = label
+                  t.gravity = Gravity.CENTER
+                  t.setTextColor(FG)
+                  t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
+                  t.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                  val d = GradientDrawable()
+                  d.shape = GradientDrawable.OVAL
+                  d.setColor(CHIP)
+                  d.setStroke(Ui.dp(1), CHIP_LINE)
+                  t.background = d
+                  return t
+              }
+
+              private fun grid(c: Context, cells: List<View>, columns: Int, cellHeightDp: Int): LinearLayout {
+                  val box = Ui.col(c)
+                  var i = 0
+                  while (i < cells.size) {
+                      val row = Ui.row(c)
+                      for (j in 0 until columns) {
+                          if (i + j < cells.size) {
+                              val lp = LinearLayout.LayoutParams(0, Ui.dp(cellHeightDp), 1f)
+                              lp.leftMargin = if (j == 0) 0 else Ui.dp(6)
+                              row.addView(cells[i + j], lp)
+                          } else {
+                              val filler = View(c)
+                              val lp = LinearLayout.LayoutParams(0, Ui.dp(cellHeightDp), 1f)
+                              lp.leftMargin = Ui.dp(6)
+                              row.addView(filler, lp)
+                          }
+                      }
+                      box.addView(row, Ui.lp(Ui.MP, Ui.WC, if (i == 0) 0 else 6))
+                      i += columns
+                  }
+                  return box
+              }
+
+              private fun readout(c: Context, sizeSp: Float): TextView {
+                  val t = TextView(c)
+                  t.gravity = Gravity.CENTER
+                  t.setTextColor(FG)
+                  t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
+                  t.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                  return t
+              }
+
+              // 1. Tap the numbers in order
+              private fun order(c: Context, level: Int, onOk: () -> Unit): Pair<String, View> {
+                  val n = if (level <= 1) 3 else if (level == 2) 5 else 7
+                  val f = stage(c, 190)
+                  val chips = ArrayList<TextView>()
+                  var next = 1
+
+                  f.post {
+                      val w = f.width
+                      val hgt = f.height
+                      if (w <= 0 || hgt <= 0) return@post
+                      val size = Ui.dp(52)
+                      val cells = ArrayList<Pair<Int, Int>>()
+                      for (r in 0..2) for (col in 0..2) cells.add(Pair(col, r))
+                      java.util.Collections.shuffle(cells)
+
+                      for (i in 0 until n) {
+                          val cell = cells[i % cells.size]
+                          val t = circle(c, (i + 1).toString())
+                          f.addView(t, FrameLayout.LayoutParams(size, size))
+                          val spanX = Math.max(1, w - size)
+                          val spanY = Math.max(1, hgt - size)
+                          t.x = cell.first * spanX / 2f
+                          t.y = cell.second * spanY / 2f
+                          chips.add(t)
+                          val mine = i + 1
+                          t.setOnClickListener {
+                              if (mine == next) {
+                                  next++
+                                  t.alpha = 0.25f
+                                  t.isEnabled = false
+                                  if (next > n) onOk()
+                              } else {
+                                  next = 1
+                                  for (x in chips) {
+                                      x.alpha = 1f
+                                      x.isEnabled = true
+                                  }
+                              }
+                          }
+                      }
+                  }
+                  return Pair("Tap 1 to $n in order", f)
+              }
+
+              // 2. Swipe the direction shown
+              private fun swipe(c: Context, level: Int, onOk: () -> Unit): Pair<String, View> {
+                  val need = Math.max(1, level)
+                  val f = stage(c, 170)
+                  val t = readout(c, 25f)
+                  f.addView(t, FrameLayout.LayoutParams(Ui.MP, Ui.MP))
+
+                  var target = DIRS[rnd.nextInt(4)]
+                  var done = 0
+                  fun render() {
+                      t.text = "Swipe $target\n$done of $need"
+                  }
+                  render()
+
+                  var sx = 0f
+                  var sy = 0f
+                  f.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              sx = e.x
+                              sy = e.y
+                          }
+                          MotionEvent.ACTION_UP -> {
+                              val dx = e.x - sx
+                              val dy = e.y - sy
+                              if (Math.max(Math.abs(dx), Math.abs(dy)) > Ui.dp(56)) {
+                                  val dir = if (Math.abs(dx) > Math.abs(dy)) {
+                                      if (dx > 0) "RIGHT" else "LEFT"
+                                  } else {
+                                      if (dy > 0) "DOWN" else "UP"
+                                  }
+                                  if (dir == target) {
+                                      done++
+                                      if (done >= need) {
+                                          t.text = "Done"
+                                          onOk()
+                                      } else {
+                                          target = DIRS[rnd.nextInt(4)]
+                                          render()
+                                      }
+                                  } else {
+                                      done = 0
+                                      target = DIRS[rnd.nextInt(4)]
+                                      render()
+                                  }
+                              }
+                          }
+                      }
+                      true
+                  }
+                  return Pair("Swipe the way it tells you", f)
+              }
+
+              // 3. Press and hold
+              private fun hold(c: Context, level: Int, onOk: () -> Unit): Pair<String, View> {
+                  val secs = if (level <= 1) 2 else if (level == 2) 4 else 6
+                  val box = Ui.col(c)
+                  val f = stage(c, 170)
+
+                  val dot = circle(c, "Hold")
+                  dot.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                  val size = Ui.dp(92)
+                  f.addView(dot, FrameLayout.LayoutParams(size, size))
+                  f.post {
+                      if (f.width <= size || f.height <= size) return@post
+                      dot.x = (0..(f.width - size)).random().toFloat()
+                      dot.y = (0..(f.height - size)).random().toFloat()
+                  }
+
+                  val bar = ProgressBar(c, null, android.R.attr.progressBarStyleHorizontal)
+                  bar.max = secs * 10
+                  bar.progress = 0
+
+                  box.addView(f)
+                  box.addView(bar, Ui.lp(Ui.MP, Ui.WC, 12))
+
+                  var ticker: Runnable? = null
+                  var done = false
+                  dot.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              if (!done) {
+                                  val r = object : Runnable {
+                                      override fun run() {
+                                          if (!dot.isAttachedToWindow) return
+                                          bar.progress = bar.progress + 1
+                                          if (bar.progress >= bar.max) {
+                                              done = true
+                                              dot.text = "Done"
+                                              onOk()
+                                          } else {
+                                              h.postDelayed(this, 100)
+                                          }
+                                      }
+                                  }
+                                  ticker = r
+                                  h.postDelayed(r, 100)
+                              }
+                          }
+                          MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                              ticker?.let { h.removeCallbacks(it) }
+                              if (!done) bar.progress = 0
+                          }
+                      }
+                      true
+                  }
+                  return Pair("Press and hold the circle for $secs seconds", box)
+              }
+
+              // 4. Spell the word by tapping letters in order (replaces the typed challenge)
+              private fun spell(c: Context, level: Int, onOk: () -> Unit): Pair<String, View> {
+                  val target = WORDS[rnd.nextInt(WORDS.size)]
+                  val decoys = if (level <= 1) 2 else if (level == 2) 4 else 6
+
+                  val letters = ArrayList<Char>()
+                  for (ch in target) letters.add(ch)
+                  val pool = "abcdefghijklmnopqrstuvwxyz"
+                  for (i in 0 until decoys) letters.add(pool[rnd.nextInt(pool.length)])
+                  java.util.Collections.shuffle(letters)
+
+                  val box = Ui.col(c)
+                  val word = readout(c, 21f)
+                  word.letterSpacing = 0.14f
+                  word.text = target
+                  box.addView(word, Ui.lp(Ui.MP, Ui.WC, 0))
+
+                  val slots = readout(c, 19f)
+                  slots.setTextColor(FG_SOFT)
+                  slots.letterSpacing = 0.14f
+                  box.addView(slots, Ui.lp(Ui.MP, Ui.WC, 10))
+
+                  var index = 0
+                  val keys = ArrayList<TextView>()
+
+                  fun paintSlots() {
+                      val sb = StringBuilder()
+                      for (i in target.indices) {
+                          sb.append(if (i < index) target[i] else '\u00b7')
+                      }
+                      slots.text = sb.toString()
+                  }
+                  paintSlots()
+
+                  for (ch in letters) {
+                      val k = key(c, ch.toString(), 17f)
+                      keys.add(k)
+                      k.setOnClickListener {
+                          if (index >= target.length) return@setOnClickListener
+                          if (ch == target[index] && k.isEnabled) {
+                              index++
+                              k.isEnabled = false
+                              k.alpha = 0.28f
+                              paintSlots()
+                              if (index >= target.length) onOk()
+                          } else {
+                              index = 0
+                              for (x in keys) {
+                                  x.isEnabled = true
+                                  x.alpha = 1f
+                              }
+                              paintSlots()
+                          }
+                      }
+                  }
+
+                  box.addView(grid(c, keys, 6, 46), Ui.lp(Ui.MP, Ui.WC, 14))
+                  return Pair("Tap the letters in order", box)
+              }
+
+              // 5. Arithmetic on a built-in keypad
+              private fun math(c: Context, level: Int, onOk: () -> Unit): Pair<String, View> {
+                  val q: String
+                  val ans: Int
+                  if (level <= 1) {
+                      val a = 11 + rnd.nextInt(80)
+                      val b = 11 + rnd.nextInt(80)
+                      q = "$a + $b"
+                      ans = a + b
+                  } else if (level == 2) {
+                      val a = 3 + rnd.nextInt(12)
+                      val b = 3 + rnd.nextInt(12)
+                      q = "$a \u00d7 $b"
+                      ans = a * b
+                  } else {
+                      val a = 4 + rnd.nextInt(11)
+                      val b = 4 + rnd.nextInt(11)
+                      // Never let the answer go negative: the keypad has no minus sign.
+                      val d = 7 + rnd.nextInt(Math.max(1, Math.min(40, a * b - 12)))
+                      q = "$a \u00d7 $b \u2212 $d"
+                      ans = a * b - d
+                  }
+
+                  val box = Ui.col(c)
+                  val question = readout(c, 27f)
+                  question.text = q
+                  box.addView(question, Ui.lp(Ui.MP, Ui.WC, 0))
+
+                  val entry = readout(c, 22f)
+                  entry.setTextColor(FG_SOFT)
+                  entry.text = "\u00b7"
+                  box.addView(entry, Ui.lp(Ui.MP, Ui.WC, 8))
+
+                  val typed = StringBuilder()
+                  val keys = ArrayList<TextView>()
+
+                  fun paint() {
+                      entry.text = if (typed.isEmpty()) "\u00b7" else typed.toString()
+                  }
+
+                  for (i in 1..9) {
+                      val k = key(c, i.toString())
+                      k.setOnClickListener {
+                          if (typed.length < 5) {
+                              typed.append(i)
+                              paint()
+                          }
+                      }
+                      keys.add(k)
+                  }
+                  val clear = key(c, "clear", 13f)
+                  clear.setOnClickListener {
+                      typed.setLength(0)
+                      paint()
+                  }
+                  val zero = key(c, "0")
+                  zero.setOnClickListener {
+                      if (typed.length < 5) {
+                          typed.append(0)
+                          paint()
+                      }
+                  }
+                  val enter = key(c, "enter", 13f)
+                  enter.setOnClickListener {
+                      if (typed.isEmpty()) return@setOnClickListener
+                      if (typed.toString().toIntOrNull() == ans) {
+                          setKeyOn(enter, true)
+                          for (k in keys) k.isEnabled = false
+                          onOk()
+                      } else {
+                          typed.setLength(0)
+                          paint()
+                          entry.text = "try again"
+                      }
+                  }
+                  keys.add(clear)
+                  keys.add(zero)
+                  keys.add(enter)
+
+                  box.addView(grid(c, keys, 3, 50), Ui.lp(Ui.MP, Ui.WC, 12))
+                  return Pair("Work it out", box)
+              }
+
+              // 6. Land the slider on a target
+              private fun slider(c: Context, level: Int, onOk: () -> Unit): Pair<String, View> {
+                  val target = 12 + rnd.nextInt(77)
+                  val tol = if (level <= 1) 3 else if (level == 2) 1 else 0
+
+                  val box = Ui.col(c)
+                  val show = readout(c, 26f)
+
+                  val sb = SeekBar(c)
+                  sb.max = 100
+                  sb.progress = 0
+                  sb.setPadding(Ui.dp(4), Ui.dp(12), Ui.dp(4), Ui.dp(10))
+                  sb.progressTintList = android.content.res.ColorStateList.valueOf(CHIP_ON)
+                  sb.thumbTintList = android.content.res.ColorStateList.valueOf(CHIP_ON)
+                  sb.progressBackgroundTintList = android.content.res.ColorStateList.valueOf(CHIP_LINE)
+
+                  fun render() {
+                      show.text = sb.progress.toString() + "  /  " + target
+                  }
+                  render()
+
+                  sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) = render()
+                      override fun onStartTrackingTouch(s: SeekBar?) {}
+                      override fun onStopTrackingTouch(s: SeekBar?) {
+                          if (Math.abs(sb.progress - target) <= tol) {
+                              show.text = "Landed"
+                              sb.isEnabled = false
+                              onOk()
+                          }
+                      }
+                  })
+
+                  box.addView(show, Ui.lp(Ui.MP, Ui.WC, 0))
+                  box.addView(sb, Ui.lp(Ui.MP, Ui.WC, 0))
+
+                  val hint = if (tol == 0) "land on it exactly" else "within $tol"
+                  return Pair("Move the slider to $target ($hint)", box)
+              }
+          }
+          PPEOF
+
+          echo "  app/src/main/java/com/waqt/Overlay.kt"
+          cat > app/src/main/java/com/waqt/Overlay.kt << 'PPEOF'
+          package com.waqt
+
+          import android.content.Context
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.Typeface
+          import android.os.Build
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.Settings
+          import android.util.TypedValue
+          import android.view.Gravity
+          import android.view.KeyEvent
+          import android.view.View
+          import android.view.WindowInsets
+          import android.view.WindowManager
+          import android.widget.FrameLayout
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          object Overlay {
+
+              const val PRE = 0
+              const val MID = 1
+              const val PREVIEW = 2
+
+              private val h = Handler(Looper.getMainLooper())
+              private var wm: WindowManager? = null
+              private var root: Root? = null
+              private var killer: Runnable? = null
+              private var ticker: Runnable? = null
+              private var mode = PRE
+
+              var pkg = ""
+                  private set
+
+              fun showing(): Boolean = root != null
+
+              class Root(c: Context) : FrameLayout(c) {
+                  var onBack: (() -> Unit)? = null
+                  override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+                      if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+                          if (event.action == KeyEvent.ACTION_UP) onBack?.invoke()
+                          return true
+                      }
+                      return super.dispatchKeyEvent(event)
+                  }
+              }
+
+              fun show(ctx: Context, target: String, m: Int, opens: Int, onEnter: () -> Unit) {
+                  if (root != null) return
+                  if (!Settings.canDrawOverlays(ctx)) return
+
+                  pkg = target
+                  mode = m
+                  val card = Store.pickCard()
+
+                  val r = Root(ctx)
+                  r.setBackgroundColor(card.bgColor)
+
+                  if (card.hasImage) {
+                      val bmp = Bg.blurred(card.id, card.blur)
+                      if (bmp != null) {
+                          val iv = ImageView(ctx)
+                          iv.scaleType = ImageView.ScaleType.CENTER_CROP
+                          iv.setImageBitmap(bmp)
+                          r.addView(iv, FrameLayout.LayoutParams(Ui.MP, Ui.MP))
+                          val dimView = View(ctx)
+                          dimView.setBackgroundColor(Color.argb(card.dim * 255 / 100, 0, 0, 0))
+                          r.addView(dimView, FrameLayout.LayoutParams(Ui.MP, Ui.MP))
+                      }
+                  }
+
+                  // Single vertical flow. Nothing is absolutely positioned, so text can never
+                  // land underneath the challenge or the buttons, whatever the font scale or
+                  // whatever the system decides to inset.
+                  val column = Ui.col(ctx)
+                  column.setPadding(Ui.dp(20), Ui.dp(18), Ui.dp(20), Ui.dp(22))
+                  r.addView(column, FrameLayout.LayoutParams(Ui.MP, Ui.MP))
+                  applyInsets(column)
+
+                  val topRow = Ui.row(ctx)
+                  val level = escalationLevel(m, opens)
+                  topRow.addView(pips(ctx, level), Ui.weighted())
+                  topRow.addView(
+                      Ui.text(
+                          ctx,
+                          if (m == PREVIEW) "preview" else "$opens today",
+                          11f,
+                          Color.parseColor("#80FFFFFF")
+                      )
+                  )
+                  column.addView(topRow, Ui.lp(Ui.MP, Ui.WC, 0))
+
+                  val topBand = Ui.col(ctx)
+                  column.addView(topBand, Ui.lp(Ui.MP, Ui.WC, 24))
+
+                  val centerBand = Ui.col(ctx)
+                  centerBand.gravity = Gravity.CENTER_VERTICAL
+                  column.addView(centerBand, LinearLayout.LayoutParams(Ui.MP, 0, 1f))
+
+                  val bottomBand = Ui.col(ctx)
+                  column.addView(bottomBand, Ui.lp(Ui.MP, Ui.WC, 0))
+
+                  for (l in card.layers) {
+                      val band = when (l.anchor) {
+                          TextLayer.TOP -> topBand
+                          TextLayer.BOTTOM -> bottomBand
+                          else -> centerBand
+                      }
+                      band.addView(layerView(ctx, l), Ui.lp(Ui.MP, Ui.WC, if (band.childCount == 0) 0 else 10))
+                  }
+
+                  // Challenge card
+                  val panel = Ui.col(ctx)
+                  panel.background = Ui.rounded(Color.parseColor("#1FFFFFFF"), 20, 1, Color.parseColor("#26FFFFFF"))
+                  panel.setPadding(Ui.dp(14), Ui.dp(14), Ui.dp(14), Ui.dp(16))
+                  column.addView(panel, Ui.lp(Ui.MP, Ui.WC, 18))
+
+                  val prompt = Ui.text(ctx, "", 11f, Color.parseColor("#8CFFFFFF"), true)
+                  prompt.letterSpacing = 0.1f
+                  prompt.gravity = Gravity.CENTER
+                  panel.addView(prompt, Ui.lp(Ui.MP, Ui.WC, 0))
+
+                  val holder = FrameLayout(ctx)
+                  panel.addView(holder, Ui.lp(Ui.MP, Ui.WC, 12))
+
+                  val leave = Ui.button(ctx, "Not now, close the app") { leave() }
+                  leave.setTextColor(Color.parseColor("#12120F"))
+                  leave.background = Ui.rounded(Color.parseColor("#FAFAF7"), 16)
+                  column.addView(leave, Ui.lp(Ui.MP, Ui.WC, 12))
+
+                  val passLink = Ui.text(ctx, "", 12f, Color.parseColor("#73FFFFFF"))
+                  passLink.gravity = Gravity.CENTER
+                  passLink.setPadding(0, Ui.dp(14), 0, 0)
+                  column.addView(passLink, Ui.lp(Ui.MP, Ui.WC, 0))
+
+                  r.onBack = { leave() }
+
+                  val lp = WindowManager.LayoutParams(
+                      Ui.MP,
+                      Ui.MP,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+
+                  val manager = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                  try {
+                      manager.addView(r, lp)
+                  } catch (e: Throwable) {
+                      return
+                  }
+                  wm = manager
+                  root = r
+
+                  val useLevel = if (m == MID) Math.min(2, level) else level
+                  val wait = when (m) {
+                      PRE -> Store.preWaitFor(target)
+                      MID -> Math.min(3, Store.preWaitFor(target))
+                      else -> 2
+                  }
+
+                  fun arm() {
+                      val pair = Challenges.make(ctx, useLevel) { unlock(onEnter) }
+                      prompt.text = pair.first.uppercase()
+                      holder.removeAllViews()
+                      holder.addView(pair.second)
+
+                      // The auto-close timer only covers the challenge itself, never the
+                      // sit-with-it countdown, so a slow solver is not thrown out mid-answer.
+                      armKiller()
+
+                      if (m == PRE && Store.passesPerDay() > 0 && Store.passesLeft() > 0) {
+                          passLink.text = "Working? Use a pass \u00b7 " + Store.passesLeft() + " left today"
+                          passLink.setOnClickListener {
+                              passLink.setOnClickListener(null)
+                              passLink.text = "Unlocking a 15 minute pass"
+                              val hard = Challenges.make(ctx, 3) {
+                                  Store.startPass(pkg)
+                                  hide()
+                              }
+                              prompt.text = hard.first.uppercase()
+                              holder.removeAllViews()
+                              holder.addView(hard.second)
+                              armKiller()
+                          }
+                      }
+                  }
+
+                  if (wait <= 0) {
+                      arm()
+                  } else {
+                      var left = wait
+                      val tick = object : Runnable {
+                          override fun run() {
+                              if (root == null) return
+                              if (left <= 0) {
+                                  arm()
+                              } else {
+                                  prompt.text = "SIT WITH IT FOR $left"
+                                  left--
+                                  h.postDelayed(this, 1000)
+                              }
+                          }
+                      }
+                      ticker = tick
+                      tick.run()
+                  }
+              }
+
+              private fun escalationLevel(m: Int, opens: Int): Int {
+                  val level = if (!Store.escalate()) 2 else if (opens <= 3) 1 else if (opens <= 8) 2 else 3
+                  return if (m == PREVIEW) 1 else level
+              }
+
+              private fun pips(c: Context, level: Int): LinearLayout {
+                  val row = Ui.row(c)
+                  for (i in 0 until 3) {
+                      val v = View(c)
+                      v.background = Ui.rounded(
+                          if (i < level) Color.parseColor("#E8593A") else Color.parseColor("#33FFFFFF"), 2
+                      )
+                      val lp = LinearLayout.LayoutParams(Ui.dp(16), Ui.dp(3))
+                      lp.rightMargin = Ui.dp(4)
+                      row.addView(v, lp)
+                  }
+                  return row
+              }
+
+              private fun layerView(c: Context, l: TextLayer): TextView {
+                  val tv = TextView(c)
+                  tv.text = l.text
+                  tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, l.size)
+                  tv.setTextColor(l.color)
+                  tv.typeface = Typeface.create(l.font, if (l.bold) Typeface.BOLD else Typeface.NORMAL)
+                  tv.gravity = when (l.align) {
+                      0 -> Gravity.START
+                      2 -> Gravity.END
+                      else -> Gravity.CENTER_HORIZONTAL
+                  }
+                  tv.setLineSpacing(Ui.dp(3).toFloat(), 1.05f)
+                  if (l.size >= 24f) tv.letterSpacing = -0.02f
+                  tv.setShadowLayer(10f, 0f, 3f, Color.argb(140, 0, 0, 0))
+                  return tv
+              }
+
+              // Keyboard, gesture bar and status bar all report through here. Nothing in the
+              // overlay opens an IME today, but padding for it costs nothing and makes the
+              // layout safe if a future challenge ever needs one.
+              private fun applyInsets(column: View) {
+                  column.setOnApplyWindowInsetsListener { v, insets ->
+                      var bottom = 0
+                      var top = 0
+                      try {
+                          if (Build.VERSION.SDK_INT >= 30) {
+                              val bars = insets.getInsets(WindowInsets.Type.systemBars())
+                              val ime = insets.getInsets(WindowInsets.Type.ime())
+                              bottom = Math.max(bars.bottom, ime.bottom)
+                              top = bars.top
+                          } else {
+                              @Suppress("DEPRECATION")
+                              bottom = insets.systemWindowInsetBottom
+                              @Suppress("DEPRECATION")
+                              top = insets.systemWindowInsetTop
+                          }
+                      } catch (e: Throwable) {
+                      }
+                      v.setPadding(Ui.dp(20), Ui.dp(18) + top, Ui.dp(20), Ui.dp(22) + bottom)
+                      insets
+                  }
+                  column.requestApplyInsets()
+              }
+
+              private fun armKiller() {
+                  killer?.let { h.removeCallbacks(it) }
+                  val k = Runnable { timeout() }
+                  killer = k
+                  h.postDelayed(k, 60000L)
+              }
+
+              private fun unlock(onEnter: () -> Unit) {
+                  h.postDelayed({
+                      hide()
+                      onEnter()
+                  }, 200)
+              }
+
+              // The user chose to turn back. This counts, and it must not leave a grace
+              // window behind, or the refusal would hand back free access on the next open.
+              private fun leave() {
+                  val m = mode
+                  val p = pkg
+                  if (m != PREVIEW) {
+                      Store.bumpGoBack()
+                      Store.markDenied(p)
+                  }
+                  hide()
+                  if (m != PREVIEW) GuardService.instance?.goHome()
+              }
+
+              // Auto-close after a minute. Not a decision, so it is not counted as turning
+              // back, but it still must not grant grace.
+              private fun timeout() {
+                  val m = mode
+                  val p = pkg
+                  if (m != PREVIEW) Store.markDenied(p)
+                  hide()
+                  if (m != PREVIEW) GuardService.instance?.goHome()
+              }
+
+              fun hide() {
+                  killer?.let { h.removeCallbacks(it) }
+                  killer = null
+                  ticker?.let { h.removeCallbacks(it) }
+                  ticker = null
+                  Challenges.cancelAll()
+                  val r = root ?: return
+                  root = null
+                  try {
+                      wm?.removeView(r)
+                  } catch (e: Throwable) {
+                  }
+                  wm = null
+              }
+          }
+          PPEOF
+
+          echo "  app/src/main/java/com/waqt/GuardService.kt"
+          cat > app/src/main/java/com/waqt/GuardService.kt << 'PPEOF'
+          package com.waqt
+
+          import android.accessibilityservice.AccessibilityService
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityWindowInfo
+          import android.view.inputmethod.InputMethodManager
+
+          class GuardService : AccessibilityService() {
+
+              companion object {
+                  var instance: GuardService? = null
+
+                  val NEVER: Set<String> = setOf(
+                      "com.android.settings",
+                      "com.android.systemui",
+                      "android",
+                      "com.android.dialer",
+                      "com.google.android.dialer",
+                      "com.android.phone",
+                      "com.android.server.telecom",
+                      "com.android.emergency",
+                      "com.android.contacts",
+                      "com.google.android.packageinstaller",
+                      "com.android.packageinstaller"
+                  )
+              }
+
+              private val h = Handler(Looper.getMainLooper())
+              private var current = ""
+              private var mid: Runnable? = null
+              private var imes: Set<String> = HashSet()
+              private var imesAt = 0L
+              private var launcher = ""
+
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  instance = this
+                  refreshImes()
+                  launcher = try {
+                      val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+                      packageManager.resolveActivity(i, PackageManager.MATCH_DEFAULT_ONLY)
+                          ?.activityInfo?.packageName ?: ""
+                  } catch (e: Throwable) {
+                      ""
+                  }
+              }
+
+              // Re-read at most once a minute so switching keyboards mid-session does not
+              // leave the new IME looking like an app launch.
+              private fun refreshImes() {
+                  val now = System.currentTimeMillis()
+                  if (now - imesAt < 60000L && imes.isNotEmpty()) return
+                  imesAt = now
+                  try {
+                      val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                      val set = HashSet<String>()
+                      for (info in imm.enabledInputMethodList) set.add(info.packageName)
+                      imes = set
+                  } catch (e: Throwable) {
+                  }
+              }
+
+              override fun onInterrupt() {}
+
+              override fun onUnbind(intent: Intent?): Boolean {
+                  cancelMid()
+                  Overlay.hide()
+                  instance = null
+                  return super.onUnbind(intent)
+              }
+
+              override fun onDestroy() {
+                  cancelMid()
+                  instance = null
+                  super.onDestroy()
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+                  if (event == null) return
+                  if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+                  val pkg = event.packageName?.toString() ?: return
+                  if (pkg.isEmpty()) return
+                  if (pkg == packageName) return
+                  if (pkg == "com.android.systemui" || pkg == "android") return
+                  refreshImes()
+                  if (imes.contains(pkg)) return
+                  if (pkg == current) return
+
+                  val prev = current
+                  current = pkg
+                  try {
+                      changed(prev, pkg)
+                  } catch (e: Throwable) {
+                  }
+              }
+
+              private fun changed(prev: String, pkg: String) {
+                  cancelMid()
+
+                  // If a pause screen was up for the app we just left, the user pressed Home
+                  // rather than answering. That is a refusal, not a normal exit, so it must
+                  // not open a grace window.
+                  val abandoned = Overlay.showing() && Overlay.pkg == prev
+                  if (prev.isNotEmpty()) {
+                      if (abandoned) Store.markDenied(prev) else Store.markLeft(prev)
+                  }
+                  if (Overlay.showing() && Overlay.pkg != pkg) Overlay.hide()
+
+                  if (!Store.enabled()) return
+                  if (NEVER.contains(pkg)) return
+                  if (launcher.isNotEmpty() && pkg == launcher) return
+                  if (!Store.guarded().contains(pkg)) return
+
+                  if (!Store.activeNow(pkg)) return
+                  if (Store.passActive(pkg)) return
+
+                  if (Store.inGrace(pkg)) {
+                      scheduleMid(pkg)
+                      return
+                  }
+
+                  h.postDelayed({
+                      if (current == pkg && !Overlay.showing()) {
+                          // Counted here, not before the delay, so a bounce off the icon or a
+                          // missing overlay permission does not inflate today's number.
+                          val opens = Store.bumpOpen(pkg)
+                          Overlay.show(this, pkg, Overlay.PRE, opens) { scheduleMid(pkg) }
+                      }
+                  }, 220)
+              }
+
+              private fun scheduleMid(pkg: String) {
+                  cancelMid()
+                  val minutes = Store.midMinutesFor(pkg)
+                  if (minutes <= 0) return
+                  val r = object : Runnable {
+                      override fun run() {
+                          if (current != pkg || !Store.enabled()) return
+                          if (!Store.activeNow(pkg) || Store.passActive(pkg)) {
+                              h.postDelayed(this, 60000L)
+                              return
+                          }
+                          if (Overlay.showing() || keyboardUp()) {
+                              h.postDelayed(this, 30000L)
+                              return
+                          }
+                          Overlay.show(this@GuardService, pkg, Overlay.MID, Store.opensOf(pkg)) {
+                              scheduleMid(pkg)
+                          }
+                      }
+                  }
+                  mid = r
+                  h.postDelayed(r, minutes * 60000L)
+              }
+
+              private fun cancelMid() {
+                  mid?.let { h.removeCallbacks(it) }
+                  mid = null
+              }
+
+              private fun keyboardUp(): Boolean {
+                  return try {
+                      val ws = windows ?: return false
+                      var found = false
+                      for (w in ws) {
+                          if (w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) found = true
+                      }
+                      found
+                  } catch (e: Throwable) {
+                      false
+                  }
+              }
+
+              fun goHome() {
+                  try {
+                      performGlobalAction(GLOBAL_ACTION_HOME)
+                  } catch (e: Throwable) {
+                  }
+              }
+          }
+          PPEOF
+
+          echo "  app/src/main/java/com/waqt/MainActivity.kt"
+          cat > app/src/main/java/com/waqt/MainActivity.kt << 'PPEOF'
+          package com.waqt
+
+          import android.content.Context
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.PowerManager
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.LinearLayout
+          import android.widget.Toast
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          class MainActivity : Base() {
+
+              private lateinit var content: LinearLayout
+
+              override fun onCreate(saved: Bundle?) {
+                  super.onCreate(saved)
+                  content = scaffold(0)
+                  Bg.sweepOrphans()
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  build()
+              }
+
+              private fun build() {
+                  content.removeAllViews()
+
+                  val head = Ui.row(this)
+                  val stack = Ui.col(this)
+                  stack.addView(Ui.title(this, "Today"))
+                  stack.addView(
+                      Ui.text(this, SimpleDateFormat("EEEE d MMMM", Locale.getDefault()).format(Date()), 13f, Ui.MUTED),
+                      Ui.lp(Ui.MP, Ui.WC, 2)
+                  )
+                  head.addView(stack, Ui.weighted())
+                  content.addView(head, Ui.lp(Ui.MP, Ui.WC, 0))
+
+                  setupCard()
+                  heroCard()
+                  metricCards()
+                  guardCard()
+
+                  content.addView(Ui.button(this, "Show me a pause screen", true) {
+                      if (!Settings.canDrawOverlays(this)) {
+                          Toast.makeText(this, "Allow drawing over other apps first", Toast.LENGTH_LONG).show()
+                      } else {
+                          Overlay.show(this, "preview", Overlay.PREVIEW, 1) {}
+                      }
+                  }, Ui.lp(Ui.MP, Ui.WC, 12))
+
+                  content.addView(
+                      Ui.text(
+                          this,
+                          "A pause screen closes itself after a minute, and Back always closes it.",
+                          12f,
+                          Ui.MUTED
+                      ),
+                      Ui.lp(Ui.MP, Ui.WC, 16)
+                  )
+              }
+
+              // Only shown while something is still missing, so a finished setup does not
+              // take up the top of the screen forever.
+              private fun setupCard() {
+                  val acc = accessibilityOn(this)
+                  val ov = Settings.canDrawOverlays(this)
+                  val bat = batteryFree(this)
+                  if (acc && ov && bat) return
+
+                  val p = Ui.panel(this)
+                  p.addView(Ui.eyebrow(this, "Finish setup"))
+                  permRow(p, "See which app is open", acc) {
+                      open(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  }
+                  permRow(p, "Draw over other apps", ov) {
+                      val i = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
+                      i.data = Uri.parse("package:$packageName")
+                      open(i)
+                  }
+                  permRow(p, "Keep running in background", bat) {
+                      try {
+                          val i = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                          i.data = Uri.parse("package:$packageName")
+                          startActivity(i)
+                      } catch (e: Throwable) {
+                          open(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                      }
+                  }
+                  content.addView(p, Ui.lp(Ui.MP, Ui.WC, 18))
+              }
+
+              private fun permRow(panel: LinearLayout, label: String, done: Boolean, action: () -> Unit) {
+                  val r = Ui.row(this)
+                  val mark = Ui.text(this, if (done) "\u2713" else "\u2022", 15f, if (done) Ui.GOOD else Ui.MUTED, true)
+                  mark.setPadding(0, 0, Ui.dp(10), 0)
+                  r.addView(mark)
+                  r.addView(Ui.text(this, label, 15f, Ui.TEXT), Ui.weighted())
+                  if (!done) r.addView(Ui.button(this, "Open") { action() })
+                  panel.addView(r, Ui.lp(Ui.MP, Ui.WC, 14))
+              }
+
+              private fun heroCard() {
+                  val p = Ui.panel(this)
+                  p.addView(Ui.eyebrow(this, "Turned back"))
+
+                  val numRow = Ui.row(this)
+                  numRow.gravity = Gravity.BOTTOM
+                  numRow.addView(Ui.display(this, Store.goBacks().toString()))
+                  val of = Ui.text(this, "of " + Store.opensToday() + " opens", 13f, Ui.MUTED)
+                  of.setPadding(Ui.dp(8), 0, 0, Ui.dp(7))
+                  numRow.addView(of)
+                  p.addView(numRow, Ui.lp(Ui.MP, Ui.WC, 4))
+
+                  p.addView(weekStrip(), Ui.lp(Ui.MP, Ui.WC, 16))
+                  content.addView(p, Ui.lp(Ui.MP, Ui.WC, 16))
+              }
+
+              private fun weekStrip(): LinearLayout {
+                  val days = Store.lastSevenDays()
+                  var peak = 1
+                  for (d in days) peak = Math.max(peak, d.opens)
+
+                  val box = Ui.col(this)
+                  val bars = Ui.row(this)
+                  bars.gravity = Gravity.BOTTOM
+                  for (d in days) {
+                      val cell = Ui.col(this)
+                      cell.gravity = Gravity.BOTTOM
+                      val bar = View(this)
+                      val hgt = Math.max(Ui.dp(4), Ui.dp(44) * d.opens / peak)
+                      bar.background = Ui.rounded(if (d.isToday) Ui.ACCENT else Ui.TRACK, 3)
+                      cell.addView(bar, LinearLayout.LayoutParams(Ui.MP, hgt))
+                      val lp = LinearLayout.LayoutParams(0, Ui.WC, 1f)
+                      lp.leftMargin = Ui.dp(3)
+                      bars.addView(cell, lp)
+                  }
+                  box.addView(bars, Ui.lp(Ui.MP, Ui.dp(46), 0))
+
+                  val labels = Ui.row(this)
+                  for (d in days) {
+                      val t = Ui.text(this, d.label, 10f, Ui.MUTED)
+                      t.gravity = Gravity.CENTER
+                      val lp = LinearLayout.LayoutParams(0, Ui.WC, 1f)
+                      lp.leftMargin = Ui.dp(3)
+                      labels.addView(t, lp)
+                  }
+                  box.addView(labels, Ui.lp(Ui.MP, Ui.WC, 6))
+                  return box
+              }
+
+              private fun metricCards() {
+                  val row = Ui.row(this)
+                  row.addView(metric("Guarded", Store.guarded().size.toString(), "apps") {
+                      startActivity(Intent(this, AppsActivity::class.java))
+                  }, Ui.weighted())
+                  row.addView(Ui.gap(this, 10))
+                  row.addView(metric("Passes", Store.passesLeft().toString(), "left today") {
+                      startActivity(Intent(this, SettingsActivity::class.java))
+                  }, Ui.weighted())
+                  content.addView(row, Ui.lp(Ui.MP, Ui.WC, 10))
+              }
+
+              private fun metric(label: String, value: String, sub: String, onClick: () -> Unit): LinearLayout {
+                  val p = Ui.panel(this)
+                  p.addView(Ui.eyebrow(this, label))
+                  val v = Ui.text(this, value, 26f, Ui.TEXT, true)
+                  p.addView(v, Ui.lp(Ui.MP, Ui.WC, 4))
+                  p.addView(Ui.text(this, sub, 11f, Ui.MUTED), Ui.lp(Ui.MP, Ui.WC, 0))
+                  p.setOnClickListener { onClick() }
+                  return p
+              }
+
+              private fun guardCard() {
+                  val p = Ui.panel(this)
+                  Ui.pillRow(
+                      this, p,
+                      "Guarding",
+                      if (Store.enabled()) "Pause screens are running" else "Paused until you switch it back on",
+                      Store.enabled(),
+                      0
+                  ) { on ->
+                      Store.setEnabled(on)
+                      build()
+                  }
+                  content.addView(p, Ui.lp(Ui.MP, Ui.WC, 10))
+              }
+
+              private fun open(i: Intent) {
+                  try {
+                      startActivity(i)
+                  } catch (e: Throwable) {
+                      Toast.makeText(this, "Could not open that settings screen", Toast.LENGTH_SHORT).show()
+                  }
+              }
+
+              companion object {
+                  fun accessibilityOn(c: Context): Boolean {
+                      return try {
+                          val s = Settings.Secure.getString(
+                              c.contentResolver,
+                              Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+                          ) ?: return false
+                          s.split(":").any { it.contains(c.packageName) && it.contains("GuardService") }
+                      } catch (e: Throwable) {
+                          false
+                      }
+                  }
+
+                  fun batteryFree(c: Context): Boolean {
+                      return try {
+                          val pm = c.getSystemService(Context.POWER_SERVICE) as PowerManager
+                          pm.isIgnoringBatteryOptimizations(c.packageName)
+                      } catch (e: Throwable) {
+                          false
+                      }
+                  }
+              }
+          }
+          PPEOF
+
+          echo "  app/src/main/java/com/waqt/AppsActivity.kt"
+          cat > app/src/main/java/com/waqt/AppsActivity.kt << 'PPEOF'
+          package com.waqt
+
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.drawable.Drawable
+          import android.os.Bundle
+          import android.text.Editable
+          import android.text.InputType
+          import android.text.TextWatcher
+          import android.util.TypedValue
+          import android.widget.EditText
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          class AppsActivity : Base() {
+
+              private class Item(val pkg: String, val label: String, val icon: Drawable?)
+
+              private lateinit var content: LinearLayout
+              private lateinit var listHost: LinearLayout
+              private lateinit var status: TextView
+              private var items: List<Item> = ArrayList()
+              private var filter = ""
+
+              override fun onCreate(saved: Bundle?) {
+                  super.onCreate(saved)
+                  content = scaffold(1)
+
+                  content.addView(Ui.title(this, "Apps"))
+                  content.addView(
+                      Ui.text(this, "Pick the ones that pull you in.", 13f, Ui.MUTED),
+                      Ui.lp(Ui.MP, Ui.WC, 2)
+                  )
+
+                  val search = EditText(this)
+                  search.hint = "Search apps"
+                  search.setSingleLine(true)
+                  search.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                  search.setTextColor(Ui.TEXT)
+                  search.setHintTextColor(Ui.MUTED)
+                  search.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                  search.background = Ui.rounded(Ui.CARD, 14, 1, Ui.LINE)
+                  search.setPadding(Ui.dp(14), Ui.dp(12), Ui.dp(14), Ui.dp(12))
+                  search.addTextChangedListener(object : TextWatcher {
+                      override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                      override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                      override fun afterTextChanged(s: Editable?) {
+                          filter = (s ?: "").toString().trim().lowercase()
+                          render()
+                      }
+                  })
+                  content.addView(search, Ui.lp(Ui.MP, Ui.WC, 16))
+
+                  status = Ui.text(this, "Reading your app list\u2026", 13f, Ui.MUTED)
+                  content.addView(status, Ui.lp(Ui.MP, Ui.WC, 16))
+
+                  listHost = Ui.col(this)
+                  content.addView(listHost, Ui.lp(Ui.MP, Ui.WC, 0))
+
+                  Thread {
+                      val found = load()
+                      runOnUiThread {
+                          items = found
+                          status.visibility = TextView.GONE
+                          render()
+                      }
+                  }.start()
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  if (items.isNotEmpty()) render()
+              }
+
+              private fun load(): List<Item> {
+                  val out = ArrayList<Item>()
+                  try {
+                      val pm = packageManager
+                      val main = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                      val home = pm.resolveActivity(
+                          Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),
+                          PackageManager.MATCH_DEFAULT_ONLY
+                      )?.activityInfo?.packageName ?: ""
+                      val seen = HashSet<String>()
+                      for (ri in pm.queryIntentActivities(main, 0)) {
+                          val p = ri.activityInfo.packageName
+                          if (p == packageName || p == home) continue
+                          if (GuardService.NEVER.contains(p)) continue
+                          if (!seen.add(p)) continue
+                          out.add(Item(p, ri.loadLabel(pm).toString(), ri.loadIcon(pm)))
+                      }
+                  } catch (e: Throwable) {
+                  }
+                  out.sortWith(compareBy { it.label.lowercase() })
+                  return out
+              }
+
+              private fun render() {
+                  listHost.removeAllViews()
+                  val guardedSet = Store.guarded()
+                  val on = ArrayList<Item>()
+                  val off = ArrayList<Item>()
+                  for (i in items) {
+                      if (filter.isNotEmpty() && !i.label.lowercase().contains(filter)) continue
+                      if (guardedSet.contains(i.pkg)) on.add(i) else off.add(i)
+                  }
+
+                  if (on.isNotEmpty()) {
+                      listHost.addView(Ui.eyebrow(this, "Guarded \u00b7 " + on.size), Ui.lp(Ui.MP, Ui.WC, 0))
+                      listHost.addView(group(on, true), Ui.lp(Ui.MP, Ui.WC, 8))
+                  }
+                  if (off.isNotEmpty()) {
+                      listHost.addView(
+                          Ui.eyebrow(this, "Everything else"),
+                          Ui.lp(Ui.MP, Ui.WC, if (on.isEmpty()) 0 else 22)
+                      )
+                      listHost.addView(group(off, false), Ui.lp(Ui.MP, Ui.WC, 8))
+                  }
+                  if (on.isEmpty() && off.isEmpty()) {
+                      listHost.addView(
+                          Ui.text(this, "Nothing matches \u201c$filter\u201d.", 14f, Ui.MUTED),
+                          Ui.lp(Ui.MP, Ui.WC, 8)
+                      )
+                  }
+              }
+
+              private fun group(list: List<Item>, guarded: Boolean): LinearLayout {
+                  val box = Ui.col(this)
+                  box.background = Ui.rounded(Ui.CARD, 20)
+                  box.setPadding(Ui.dp(6), Ui.dp(6), Ui.dp(6), Ui.dp(6))
+                  for (i in list.indices) {
+                      if (i > 0) {
+                          val line = Ui.hairline(this)
+                          val lp = LinearLayout.LayoutParams(Ui.MP, Math.max(1, Ui.dp(1) / 2))
+                          lp.leftMargin = Ui.dp(8)
+                          lp.rightMargin = Ui.dp(8)
+                          box.addView(line, lp)
+                      }
+                      box.addView(row(list[i], guarded))
+                  }
+                  return box
+              }
+
+              private fun row(item: Item, guarded: Boolean): LinearLayout {
+                  val row = Ui.row(this)
+                  row.setPadding(Ui.dp(8), Ui.dp(10), Ui.dp(8), Ui.dp(10))
+
+                  val iv = ImageView(this)
+                  if (item.icon != null) iv.setImageDrawable(item.icon)
+                  val ilp = LinearLayout.LayoutParams(Ui.dp(34), Ui.dp(34))
+                  ilp.rightMargin = Ui.dp(12)
+                  row.addView(iv, ilp)
+
+                  val stack = Ui.col(this)
+                  stack.addView(Ui.text(this, item.label, 15f, Ui.TEXT))
+                  if (guarded) {
+                      stack.addView(
+                          Ui.text(this, Store.ruleSummary(item.pkg), 12f, Ui.MUTED),
+                          Ui.lp(Ui.MP, Ui.WC, 1)
+                      )
+                  }
+                  stack.setOnClickListener {
+                      if (Store.guarded().contains(item.pkg)) openRule(item)
+                  }
+                  row.addView(stack, Ui.weighted())
+
+                  row.addView(Ui.pill(this, guarded) { on ->
+                      val set = Store.guarded()
+                      if (on) set.add(item.pkg) else set.remove(item.pkg)
+                      Store.setGuarded(set)
+                      render()
+                  }, Ui.pillLp())
+
+                  return row
+              }
+
+              private fun openRule(item: Item) {
+                  val i = Intent(this, AppRuleActivity::class.java)
+                  i.putExtra("pkg", item.pkg)
+                  i.putExtra("label", item.label)
+                  startActivity(i)
+              }
+          }
+          PPEOF
+
+          echo "  app/src/main/java/com/waqt/AppRuleActivity.kt"
+          cat > app/src/main/java/com/waqt/AppRuleActivity.kt << 'PPEOF'
+          package com.waqt
+
+          import android.os.Bundle
+          import android.view.View
+          import android.widget.LinearLayout
+
+          class AppRuleActivity : Base() {
+
+              private var pkg = ""
+
+              override fun onCreate(saved: Bundle?) {
+                  super.onCreate(saved)
+
+                  pkg = intent.getStringExtra("pkg") ?: ""
+                  val label = intent.getStringExtra("label") ?: pkg
+                  if (pkg.isEmpty()) {
+                      finish()
+                      return
+                  }
+
+                  val content = scaffold(-1)
+                  header(content, label, "Rules for this app only. Changes save as you make them.")
+
+                  // ---- timing ----
+                  val tp = Ui.panel(this)
+                  tp.addView(Ui.eyebrow(this, "Timing"))
+                  val tbody = Ui.col(this)
+
+                  Ui.pillRow(
+                      this, tp,
+                      "Its own timing",
+                      "Off means it follows your defaults.",
+                      Store.customTiming(pkg),
+                      16
+                  ) { on ->
+                      Store.setCustomTiming(pkg, on)
+                      tbody.visibility = if (on) View.VISIBLE else View.GONE
+                  }
+
+                  tp.addView(tbody, Ui.lp(Ui.MP, Ui.WC, 0))
+                  Ui.slider(tbody, "Wait before you can act", 0, 15, Store.preWaitFor(pkg),
+                      { if (it == 0) "none" else it.toString() + "s" },
+                      { Store.setRuleInt(pkg, "preWait", it) })
+                  Ui.slider(tbody, "Interrupt again every", 0, 30, Store.midMinutesFor(pkg),
+                      { if (it == 0) "off" else "$it min" },
+                      { Store.setRuleInt(pkg, "mid", it) })
+                  tbody.visibility = if (Store.customTiming(pkg)) View.VISIBLE else View.GONE
+
+                  content.addView(tp, Ui.lp(Ui.MP, Ui.WC, 22))
+
+                  // ---- hours ----
+                  // One toggle only. Turning it on means this app has set hours; the body
+                  // just edits them.
+                  val hp = Ui.panel(this)
+                  hp.addView(Ui.eyebrow(this, "Hours"))
+                  val hbody = Ui.col(this)
+
+                  Ui.pillRow(
+                      this, hp,
+                      "Its own hours",
+                      "Off means it follows your default hours.",
+                      Store.customHours(pkg),
+                      16
+                  ) { on ->
+                      Store.setCustomHours(pkg, on)
+                      if (on) Store.setAppWin(pkg, "on", 1)
+                      hbody.visibility = if (on) View.VISIBLE else View.GONE
+                  }
+
+                  hp.addView(hbody, Ui.lp(Ui.MP, Ui.WC, 0))
+                  Ui.hoursBody(
+                      this, hbody,
+                      { intArrayOf(1, Store.appHours(pkg)[1], Store.appHours(pkg)[2], Store.appHours(pkg)[3]) },
+                      { k, v -> Store.setAppWin(pkg, k, v) }
+                  )
+                  hbody.visibility = if (Store.customHours(pkg)) View.VISIBLE else View.GONE
+
+                  content.addView(hp, Ui.lp(Ui.MP, Ui.WC, 14))
+
+                  content.addView(
+                      Ui.text(
+                          this,
+                          "Example: keep this app guarded 9 AM to 6 PM with a 5 minute interrupt, and leave everything else on your gentler defaults.",
+                          12f,
+                          Ui.MUTED
+                      ),
+                      Ui.lp(Ui.MP, Ui.WC, 22)
+                  )
+              }
+          }
+          PPEOF
+
+          echo "  app/src/main/java/com/waqt/CardsActivity.kt"
+          cat > app/src/main/java/com/waqt/CardsActivity.kt << 'PPEOF'
+          package com.waqt
+
+          import android.content.Intent
+          import android.graphics.Color
+          import android.os.Bundle
+          import android.view.Gravity
+          import android.widget.LinearLayout
+
+          class CardsActivity : Base() {
+
+              private lateinit var content: LinearLayout
+              private lateinit var listHost: LinearLayout
+
+              override fun onCreate(saved: Bundle?) {
+                  super.onCreate(saved)
+                  content = scaffold(2)
+
+                  content.addView(Ui.title(this, "Screens"))
+                  content.addView(
+                      Ui.text(this, "One is picked at random each time. More screens, slower they go stale.", 13f, Ui.MUTED),
+                      Ui.lp(Ui.MP, Ui.WC, 2)
+                  )
+
+                  content.addView(Ui.button(this, "New screen", true) {
+                      val c = Card()
+                      c.name = "Screen " + (Store.cards().size + 1)
+                      c.layers.add(TextLayer.of("Say something to yourself.", TextLayer.CENTER, 28f, Color.WHITE, true))
+                      val all = Store.cards()
+                      all.add(c)
+                      Store.saveCards(all)
+                      edit(c.id)
+                  }, Ui.lp(Ui.MP, Ui.WC, 18))
+
+                  listHost = Ui.col(this)
+                  content.addView(listHost, Ui.lp(Ui.MP, Ui.WC, 16))
+              }
+
+              private fun edit(id: String) {
+                  val i = Intent(this, EditorActivity::class.java)
+                  i.putExtra("id", id)
+                  startActivity(i)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  listHost.removeAllViews()
+                  for (c in Store.cards()) {
+                      val panel = Ui.col(this)
+                      panel.background = Ui.rounded(c.bgColor, 20)
+                      panel.setPadding(Ui.dp(16), Ui.dp(18), Ui.dp(16), Ui.dp(16))
+
+                      val first = if (c.layers.isEmpty()) "(empty)" else c.layers[0].text
+                      val preview = Ui.text(this, first, 18f, Color.parseColor("#FAFAF7"), true)
+                      preview.maxLines = 3
+                      panel.addView(preview)
+                      panel.addView(
+                          Ui.text(this, c.name, 12f, Color.parseColor("#8CFFFFFF")),
+                          Ui.lp(Ui.MP, Ui.WC, 8)
+                      )
+
+                      val row = Ui.row(this)
+                      row.gravity = Gravity.END
+                      row.addView(chip("Edit") { edit(c.id) })
+                      row.addView(Ui.gap(this, 8))
+                      row.addView(chip("Delete") {
+                          val keep = ArrayList<Card>()
+                          for (x in Store.cards()) if (x.id != c.id) keep.add(x)
+                          if (keep.isEmpty()) {
+                              android.widget.Toast
+                                  .makeText(this, "Keep at least one screen", android.widget.Toast.LENGTH_SHORT)
+                                  .show()
+                          } else {
+                              Store.saveCards(keep)
+                              Bg.clearCache(c.id)
+                              Bg.sweepOrphans()
+                              onResume()
+                          }
+                      })
+                      panel.addView(row, Ui.lp(Ui.MP, Ui.WC, 16))
+
+                      listHost.addView(panel, Ui.lp(Ui.MP, Ui.WC, 12))
+                  }
+              }
+
+              private fun chip(label: String, onClick: () -> Unit): android.widget.TextView {
+                  val t = Ui.text(this, label, 13f, Color.parseColor("#FAFAF7"), true)
+                  t.setPadding(Ui.dp(16), Ui.dp(10), Ui.dp(16), Ui.dp(10))
+                  t.background = Ui.rounded(Color.parseColor("#26FFFFFF"), 12, 1, Color.parseColor("#33FFFFFF"))
+                  t.setOnClickListener { onClick() }
+                  return t
+              }
+          }
+          PPEOF
+
+          echo "  app/src/main/java/com/waqt/EditorActivity.kt"
+          cat > app/src/main/java/com/waqt/EditorActivity.kt << 'PPEOF'
+          package com.waqt
+
+          import android.app.AlertDialog
+          import android.content.Intent
+          import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.net.Uri
+          import android.os.Bundle
+          import android.util.TypedValue
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.AdapterView
+          import android.widget.ArrayAdapter
+          import android.widget.EditText
+          import android.widget.FrameLayout
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.Spinner
+          import android.widget.TextView
+          import android.widget.Toast
+          import java.io.FileOutputStream
+
+          class EditorActivity : Base() {
+
+              private var card = Card()
+              private var selected = 0
+              private var syncing = false
+
+              private lateinit var content: LinearLayout
+              private lateinit var preview: FrameLayout
+              private lateinit var chipRow: LinearLayout
+              private lateinit var textPanelHost: LinearLayout
+              private lateinit var nameField: EditText
+
+              private val fonts = arrayOf(
+                  "sans-serif", "sans-serif-light", "sans-serif-medium",
+                  "sans-serif-condensed", "sans-serif-black", "serif", "monospace", "cursive"
+              )
+
+              private val swatches = intArrayOf(
+                  Color.WHITE, Color.parseColor("#E9EEF4"), Color.parseColor("#F4D35E"),
+                  Color.parseColor("#E8593A"), Color.parseColor("#7FD1AE"), Color.parseColor("#8FB8F0"),
+                  Color.parseColor("#C9A7E0"), Color.parseColor("#111111")
+              )
+
+              private val bgSwatches = intArrayOf(
+                  Color.parseColor("#141412"), Color.parseColor("#0B0E13"), Color.parseColor("#191219"),
+                  Color.parseColor("#0F1A17"), Color.parseColor("#16131F"), Color.parseColor("#1C1710"),
+                  Color.parseColor("#101C24"), Color.parseColor("#F2EFE6")
+              )
+
+              override fun onCreate(saved: Bundle?) {
+                  super.onCreate(saved)
+
+                  val id = intent.getStringExtra("id") ?: ""
+                  for (c in Store.cards()) if (c.id == id) card = c
+                  if (card.layers.isEmpty()) {
+                      card.layers.add(TextLayer.of("Say something to yourself.", TextLayer.CENTER, 28f, Color.WHITE, true))
+                  }
+
+                  content = scaffold(-1)
+                  header(content, "Edit screen", "Text sits in one of three bands, so it can never cover the buttons.")
+
+                  preview = FrameLayout(this)
+                  content.addView(preview, Ui.lp(Ui.MP, Ui.dp(300), 18))
+
+                  chipRow = Ui.row(this)
+                  content.addView(chipRow, Ui.lp(Ui.MP, Ui.WC, 14))
+
+                  textPanel()
+                  backgroundPanel()
+                  namePanel()
+
+                  content.addView(Ui.button(this, "Save screen", true) { save() }, Ui.lp(Ui.MP, Ui.WC, 18))
+
+                  render()
+              }
+
+              private fun layer(): TextLayer {
+                  if (selected >= card.layers.size) selected = 0
+                  return card.layers[selected]
+              }
+
+              // ---- panels ----
+
+              // Rebuilt whenever the selected line changes, so the sliders and segmented
+              // controls always show the values of the line you are actually editing.
+              private fun textPanel() {
+                  textPanelHost = Ui.col(this)
+                  content.addView(textPanelHost, Ui.lp(Ui.MP, Ui.WC, 16))
+                  fillTextPanel()
+              }
+
+              private fun selectLayer(index: Int) {
+                  selected = index
+                  fillTextPanel()
+                  render()
+              }
+
+              private fun fillTextPanel() {
+                  textPanelHost.removeAllViews()
+                  val p = Ui.panel(this)
+                  p.addView(Ui.eyebrow(this, "Line " + (selected + 1)))
+
+                  val brow = Ui.row(this)
+                  brow.addView(Ui.button(this, "Add line") {
+                      val t = TextLayer()
+                      t.text = "New line"
+                      t.size = 18f
+                      t.anchor = TextLayer.CENTER
+                      card.layers.add(t)
+                      selectLayer(card.layers.size - 1)
+                  }, Ui.weighted())
+                  brow.addView(Ui.gap(this, 8))
+                  brow.addView(Ui.button(this, "Words") { editWords() }, Ui.weighted())
+                  brow.addView(Ui.gap(this, 8))
+                  brow.addView(Ui.button(this, "Remove") {
+                      if (card.layers.size > 1) {
+                          card.layers.removeAt(selected)
+                          selectLayer(0)
+                      } else {
+                          Toast.makeText(this, "Keep at least one line", Toast.LENGTH_SHORT).show()
+                      }
+                  }, Ui.weighted())
+                  p.addView(brow, Ui.lp(Ui.MP, Ui.WC, 12))
+
+                  p.addView(Ui.text(this, "Position", 15f, Ui.TEXT), Ui.lp(Ui.MP, Ui.WC, 16))
+                  p.addView(Ui.segmented(this, arrayOf("Top", "Middle", "Bottom"), layer().anchor) {
+                      layer().anchor = it
+                      render()
+                  }, Ui.lp(Ui.MP, Ui.WC, 8))
+
+                  p.addView(Ui.text(this, "Alignment", 15f, Ui.TEXT), Ui.lp(Ui.MP, Ui.WC, 16))
+                  p.addView(Ui.segmented(this, arrayOf("Left", "Centre", "Right"), layer().align) {
+                      layer().align = it
+                      render()
+                  }, Ui.lp(Ui.MP, Ui.WC, 8))
+
+                  Ui.slider(p, "Size", 12, 76, layer().size.toInt(), { it.toString() }, {
+                      layer().size = it.toFloat()
+                      render()
+                  })
+
+                  p.addView(Ui.text(this, "Font", 15f, Ui.TEXT), Ui.lp(Ui.MP, Ui.WC, 18))
+                  val spin = Spinner(this)
+                  val ad = ArrayAdapter(this, android.R.layout.simple_spinner_item, fonts)
+                  ad.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+                  spin.adapter = ad
+                  var pos = 0
+                  for (i in fonts.indices) if (fonts[i] == layer().font) pos = i
+                  spin.setSelection(pos)
+                  spin.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                      override fun onItemSelected(parent: AdapterView<*>?, v: View?, position: Int, id: Long) {
+                          if (syncing) return
+                          layer().font = fonts[position]
+                          render()
+                      }
+
+                      override fun onNothingSelected(parent: AdapterView<*>?) {}
+                  }
+                  p.addView(spin, Ui.lp(Ui.MP, Ui.WC, 6))
+
+                  Ui.pillRow(this, p, "Bold", "", layer().bold, 16) {
+                      layer().bold = it
+                      render()
+                  }
+
+                  p.addView(Ui.text(this, "Colour", 15f, Ui.TEXT), Ui.lp(Ui.MP, Ui.WC, 18))
+                  p.addView(swatchRow(swatches) {
+                      layer().color = it
+                      render()
+                  }, Ui.lp(Ui.MP, Ui.WC, 10))
+
+                  textPanelHost.addView(p, Ui.lp(Ui.MP, Ui.WC, 0))
+              }
+
+              private fun backgroundPanel() {
+                  val p = Ui.panel(this)
+                  p.addView(Ui.eyebrow(this, "Background"))
+                  p.addView(swatchRow(bgSwatches) {
+                      card.bgColor = it
+                      render()
+                  }, Ui.lp(Ui.MP, Ui.WC, 12))
+
+                  val irow = Ui.row(this)
+                  irow.addView(Ui.button(this, "Choose photo") {
+                      val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
+                      i.addCategory(Intent.CATEGORY_OPENABLE)
+                      i.type = "image/*"
+                      try {
+                          startActivityForResult(i, 7)
+                      } catch (e: Throwable) {
+                          Toast.makeText(this, "No photo picker found", Toast.LENGTH_SHORT).show()
+                      }
+                  }, Ui.weighted())
+                  irow.addView(Ui.gap(this, 8))
+                  irow.addView(Ui.button(this, "Remove photo") {
+                      card.hasImage = false
+                      Bg.clearCache(card.id)
+                      render()
+                  }, Ui.weighted())
+                  p.addView(irow, Ui.lp(Ui.MP, Ui.WC, 12))
+
+                  Ui.slider(p, "Blur", 0, 30, card.blur, { it.toString() }, {
+                      card.blur = it
+                      render()
+                  })
+                  Ui.slider(p, "Darken", 0, 85, card.dim, { "$it%" }, {
+                      card.dim = it
+                      render()
+                  })
+                  content.addView(p, Ui.lp(Ui.MP, Ui.WC, 14))
+              }
+
+              private fun namePanel() {
+                  val p = Ui.panel(this)
+                  p.addView(Ui.eyebrow(this, "Name"))
+                  nameField = EditText(this)
+                  nameField.setText(card.name)
+                  nameField.setSingleLine(true)
+                  nameField.setTextColor(Ui.TEXT)
+                  nameField.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                  nameField.background = Ui.rounded(Ui.BG, 14, 1, Ui.LINE)
+                  nameField.setPadding(Ui.dp(14), Ui.dp(13), Ui.dp(14), Ui.dp(13))
+                  p.addView(nameField, Ui.lp(Ui.MP, Ui.WC, 12))
+                  content.addView(p, Ui.lp(Ui.MP, Ui.WC, 14))
+              }
+
+              private fun swatchRow(colors: IntArray, onPick: (Int) -> Unit): LinearLayout {
+                  val row = Ui.row(this)
+                  for (c in colors) {
+                      val v = View(this)
+                      v.background = Ui.rounded(c, 10, 1, Ui.LINE)
+                      val lp = LinearLayout.LayoutParams(0, Ui.dp(34), 1f)
+                      lp.rightMargin = Ui.dp(8)
+                      v.setOnClickListener { onPick(c) }
+                      row.addView(v, lp)
+                  }
+                  return row
+              }
+
+              private fun editWords() {
+                  val e = EditText(this)
+                  e.setText(layer().text)
+                  e.setPadding(Ui.dp(20), Ui.dp(16), Ui.dp(20), Ui.dp(16))
+                  AlertDialog.Builder(this)
+                      .setTitle("What should it say?")
+                      .setView(e)
+                      .setPositiveButton("Set") { _, _ ->
+                          layer().text = e.text.toString()
+                          render()
+                      }
+                      .setNegativeButton("Cancel", null)
+                      .show()
+              }
+
+              // ---- preview, mirroring the overlay's own band layout ----
+
+              private fun render() {
+                  syncing = true
+                  preview.removeAllViews()
+                  preview.background = Ui.rounded(card.bgColor, 20)
+                  preview.clipToOutline = true
+
+                  if (card.hasImage) {
+                      val bmp = Bg.blurred(card.id, card.blur)
+                      if (bmp != null) {
+                          val iv = ImageView(this)
+                          iv.scaleType = ImageView.ScaleType.CENTER_CROP
+                          iv.setImageBitmap(bmp)
+                          preview.addView(iv, FrameLayout.LayoutParams(Ui.MP, Ui.MP))
+                          val dim = View(this)
+                          dim.setBackgroundColor(Color.argb(card.dim * 255 / 100, 0, 0, 0))
+                          preview.addView(dim, FrameLayout.LayoutParams(Ui.MP, Ui.MP))
+                      }
+                  }
+
+                  val column = Ui.col(this)
+                  column.setPadding(Ui.dp(14), Ui.dp(14), Ui.dp(14), Ui.dp(14))
+                  preview.addView(column, FrameLayout.LayoutParams(Ui.MP, Ui.MP))
+
+                  val top = Ui.col(this)
+                  column.addView(top, Ui.lp(Ui.MP, Ui.WC, 0))
+                  val mid = Ui.col(this)
+                  mid.gravity = Gravity.CENTER_VERTICAL
+                  column.addView(mid, LinearLayout.LayoutParams(Ui.MP, 0, 1f))
+                  val bottom = Ui.col(this)
+                  column.addView(bottom, Ui.lp(Ui.MP, Ui.WC, 0))
+
+                  val scale = 0.58f
+                  for (i in card.layers.indices) {
+                      val l = card.layers[i]
+                      val tv = TextView(this)
+                      tv.text = l.text
+                      tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, l.size * scale)
+                      tv.setTextColor(l.color)
+                      tv.typeface = Typeface.create(l.font, if (l.bold) Typeface.BOLD else Typeface.NORMAL)
+                      tv.gravity = when (l.align) {
+                          0 -> Gravity.START
+                          2 -> Gravity.END
+                          else -> Gravity.CENTER_HORIZONTAL
+                      }
+                      tv.setPadding(Ui.dp(4), Ui.dp(3), Ui.dp(4), Ui.dp(3))
+                      if (i == selected) {
+                          tv.background = Ui.rounded(Color.TRANSPARENT, 8, 1, Ui.ACCENT)
+                      }
+                      val band = when (l.anchor) {
+                          TextLayer.TOP -> top
+                          TextLayer.BOTTOM -> bottom
+                          else -> mid
+                      }
+                      band.addView(tv, Ui.lp(Ui.MP, Ui.WC, if (band.childCount == 0) 0 else 6))
+                      val idx = i
+                      tv.setOnClickListener {
+                          selectLayer(idx)
+                      }
+                  }
+
+                  // Where the challenge and buttons will sit in the real thing.
+                  val reserved = View(this)
+                  reserved.background = Ui.rounded(Color.parseColor("#1FFFFFFF"), 12)
+                  column.addView(reserved, Ui.lp(Ui.MP, Ui.dp(54), 10))
+                  val note = Ui.text(this, "challenge and buttons", 10f, Color.parseColor("#73FFFFFF"))
+                  note.gravity = Gravity.CENTER
+                  column.addView(note, Ui.lp(Ui.MP, Ui.WC, 4))
+
+                  renderChips()
+                  syncing = false
+              }
+
+              private fun renderChips() {
+                  chipRow.removeAllViews()
+                  for (i in card.layers.indices) {
+                      val on = i == selected
+                      val t = Ui.text(this, "Line " + (i + 1), 13f, if (on) Ui.ON_INK else Ui.MUTED, on)
+                      t.setPadding(Ui.dp(14), Ui.dp(9), Ui.dp(14), Ui.dp(9))
+                      t.background = Ui.rounded(if (on) Ui.INK else Ui.CARD, 12, 1, Ui.LINE)
+                      val lp = LinearLayout.LayoutParams(Ui.WC, Ui.WC)
+                      lp.rightMargin = Ui.dp(8)
+                      val idx = i
+                      t.setOnClickListener {
+                          selectLayer(idx)
+                      }
+                      chipRow.addView(t, lp)
+                  }
+              }
+
+              private fun save() {
+                  card.name = nameField.text.toString().ifBlank { "Untitled screen" }
+                  val all = Store.cards()
+                  var replaced = false
+                  for (i in all.indices) {
+                      if (all[i].id == card.id) {
+                          all[i] = card
+                          replaced = true
+                      }
+                  }
+                  if (!replaced) all.add(card)
+                  Store.saveCards(all)
+                  Bg.sweepOrphans()
+                  Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show()
+                  finish()
+              }
+
+              override fun onActivityResult(req: Int, res: Int, data: Intent?) {
+                  super.onActivityResult(req, res, data)
+                  if (req != 7 || res != RESULT_OK) return
+                  val uri = data?.data ?: return
+                  Thread {
+                      val ok = importImage(uri)
+                      runOnUiThread {
+                          if (ok) {
+                              card.hasImage = true
+                              Bg.clearCache(card.id)
+                              render()
+                          } else {
+                              Toast.makeText(this, "Could not read that photo", Toast.LENGTH_SHORT).show()
+                          }
+                      }
+                  }.start()
+              }
+
+              private fun importImage(uri: Uri): Boolean {
+                  return try {
+                      val probe = BitmapFactory.Options()
+                      probe.inJustDecodeBounds = true
+                      contentResolver.openInputStream(uri)?.use {
+                          BitmapFactory.decodeStream(it, null, probe)
+                      }
+                      var sample = 1
+                      while (probe.outWidth / sample > 1400 || probe.outHeight / sample > 1400) sample *= 2
+                      val opts = BitmapFactory.Options()
+                      opts.inSampleSize = sample
+                      val bmp = contentResolver.openInputStream(uri)?.use {
+                          BitmapFactory.decodeStream(it, null, opts)
+                      } ?: return false
+                      FileOutputStream(Bg.file(card.id)).use {
+                          bmp.compress(Bitmap.CompressFormat.JPEG, 88, it)
+                      }
+                      true
+                  } catch (e: Throwable) {
+                      false
+                  }
+              }
+          }
+          PPEOF
+
+          echo "  app/src/main/java/com/waqt/SettingsActivity.kt"
+          cat > app/src/main/java/com/waqt/SettingsActivity.kt << 'PPEOF'
+          package com.waqt
+
+          import android.os.Bundle
+          import android.widget.LinearLayout
+
+          class SettingsActivity : Base() {
+
+              override fun onCreate(saved: Bundle?) {
+                  super.onCreate(saved)
+                  val content = scaffold(3)
+
+                  content.addView(Ui.title(this, "Settings"))
+                  content.addView(
+                      Ui.text(this, "Defaults for every guarded app. Any app can override them.", 13f, Ui.MUTED),
+                      Ui.lp(Ui.MP, Ui.WC, 2)
+                  )
+
+                  appearance(content)
+                  timing(content)
+                  hours(content)
+
+                  content.addView(
+                      Ui.text(
+                          this,
+                          "To stop Waqt completely, turn it off under Android accessibility settings.",
+                          12f,
+                          Ui.MUTED
+                      ),
+                      Ui.lp(Ui.MP, Ui.WC, 20)
+                  )
+              }
+
+              private fun appearance(content: LinearLayout) {
+                  val p = Ui.panel(this)
+                  p.addView(Ui.eyebrow(this, "Appearance"))
+                  p.addView(
+                      Ui.text(this, "System follows your phone's light and dark setting.", 12f, Ui.MUTED),
+                      Ui.lp(Ui.MP, Ui.WC, 6)
+                  )
+                  p.addView(
+                      Ui.segmented(this, arrayOf("System", "Light", "Dark"), Store.themeMode()) { picked ->
+                          if (picked != Store.themeMode()) {
+                              Store.setThemeMode(picked)
+                              recreate()
+                          }
+                      },
+                      Ui.lp(Ui.MP, Ui.WC, 12)
+                  )
+                  p.addView(
+                      Ui.text(this, "Pause screens keep their own colours either way.", 12f, Ui.MUTED),
+                      Ui.lp(Ui.MP, Ui.WC, 12)
+                  )
+                  content.addView(p, Ui.lp(Ui.MP, Ui.WC, 20))
+              }
+
+              private fun timing(content: LinearLayout) {
+                  val p = Ui.panel(this)
+                  p.addView(Ui.eyebrow(this, "Default timing"))
+                  Ui.slider(p, "Wait before you can act", 0, 15, Store.preWait(),
+                      { if (it == 0) "none" else it.toString() + "s" }, { Store.setPreWait(it) })
+                  Ui.slider(p, "Interrupt every", 0, 30, Store.midMinutes(),
+                      { if (it == 0) "off" else "$it min" }, { Store.setMidMinutes(it) })
+                  Ui.slider(p, "Free re-entry window", 0, 10, Store.graceMinutes(),
+                      { if (it == 0) "none" else "$it min" }, { Store.setGraceMinutes(it) })
+                  Ui.slider(p, "Work passes per day", 0, 6, Store.passesPerDay(),
+                      { if (it == 0) "none" else it.toString() }, { Store.setPassesPerDay(it) })
+
+                  Ui.pillRow(
+                      this, p,
+                      "Get harder as the day goes",
+                      "Open 12 should not feel like open 1.",
+                      Store.escalate(),
+                      22
+                  ) { Store.setEscalate(it) }
+
+                  p.addView(
+                      Ui.text(
+                          this,
+                          "Turning back after a pause screen never opens a free re-entry window \u2014 only leaving an app normally does.",
+                          12f,
+                          Ui.MUTED
+                      ),
+                      Ui.lp(Ui.MP, Ui.WC, 16)
+                  )
+                  content.addView(p, Ui.lp(Ui.MP, Ui.WC, 14))
+              }
+
+              private fun hours(content: LinearLayout) {
+                  val p = Ui.panel(this)
+                  p.addView(Ui.eyebrow(this, "Default hours"))
+                  Ui.hoursBlock(this, p, { Store.globalHours() }, { k, v -> Store.setWin(k, v) })
+                  p.addView(
+                      Ui.text(
+                          this,
+                          "Worth knowing: a daily free window is a window your habit will move into. Leaving this off is usually stronger.",
+                          12f,
+                          Ui.MUTED
+                      ),
+                      Ui.lp(Ui.MP, Ui.WC, 14)
+                  )
+                  content.addView(p, Ui.lp(Ui.MP, Ui.WC, 14))
+              }
+          }
+          PPEOF
+
+          echo "  app/src/main/res/drawable/ic_launcher.xml"
+          cat > app/src/main/res/drawable/ic_launcher.xml << 'PPEOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path
+                  android:fillColor="#141412"
+                  android:pathData="M0,0h108v108h-108z" />
+              <path
+                  android:fillColor="#FAFAF7"
+                  android:pathData="M34,30h40l-20,24z" />
+              <path
+                  android:fillColor="#E8593A"
+                  android:pathData="M54,54l20,24h-40z" />
+          </vector>
+          PPEOF
+
+          echo "  app/src/main/res/values/strings.xml"
+          cat > app/src/main/res/values/strings.xml << 'PPEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Waqt</string>
+              <string name="acc_desc">Waqt needs this to see which app you just opened, so it can show your pause screen before you get pulled in. It does not read or store anything you type.</string>
+          </resources>
+          PPEOF
+
+          echo "  app/src/main/res/xml/acc_config.xml"
+          cat > app/src/main/res/xml/acc_config.xml << 'PPEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagRetrieveInteractiveWindows"
+              android:canRetrieveWindowContent="true"
+              android:notificationTimeout="100"
+              android:description="@string/acc_desc" />
+          PPEOF
+
+      - name: Build debug APK
+        run: gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Collect APK
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk "out/waqt-${{ github.run_number }}.apk"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: waqt-apk
+          path: out/*.apk
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${{ github.run_number }}"
+          gh release create "$TAG" out/*.apk \
+            --title "Waqt build ${{ github.run_number }}" \
+            --notes "Tap the .apk below to install. You will need to allow installs from unknown sources." \
+          || gh release upload "$TAG" out/*.apk --clobber
